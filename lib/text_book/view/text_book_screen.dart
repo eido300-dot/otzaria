@@ -1,7 +1,10 @@
+import 'package:otzaria/widgets/layout/chrome_auto_hide.dart';
 import 'package:otzaria/text_book/view/reader_export_actions.dart';
 import 'package:otzaria/text_book/view/reader_print_actions.dart';
 import 'package:otzaria/text_book/view/reader_shamor_zachor_actions.dart';
 import 'package:otzaria/theme/app_density.dart';
+import 'package:otzaria/theme/app_fonts.dart';
+import 'package:otzaria/theme/app_motion.dart';
 import 'package:otzaria/core/messages/common_messages.dart';
 import 'package:otzaria/core/windowing/app_window_keys.dart';
 import 'dart:io';
@@ -115,6 +118,10 @@ import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/widgets/navigation/nav_side_panel.dart';
 import 'package:otzaria/widgets/navigation/app_top_bar.dart';
 import 'package:otzaria/utils/ui/reading_left_pane_policy.dart';
+
+/// המקום המינימלי לתוכן הספר כדי שחלונית הניווט תידחק ליד התוכן. מתחת לזה
+/// היא נפתחת כ-overlay, ואין טעם בכפתור נעיצה.
+const double _kNavMinMainContentWidth = 520;
 
 // קבועים למצבי תצוגה (למניעת magic strings)
 const String _viewModeSplit = 'split';
@@ -364,6 +371,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
       length: 3, // ברירת מחדל, יעודכן ב-_checkAltTitles
       vsync: this,
       initialIndex: initialIndex,
+      animationDuration: AppMotion.tabSwitch,
     );
     tabController.addListener(_handleTabChange);
     // ה-listener נורה רק על שינוי, ובלי סימון מיידי סרגל החיפוש מושבת
@@ -558,6 +566,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
             length: newLength,
             vsync: this,
             initialIndex: newIndex,
+            animationDuration: AppMotion.tabSwitch,
           );
           tabController.addListener(_handleTabChange);
           _syncSearchHostActiveTab();
@@ -1058,8 +1067,14 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
                 child: Scaffold(
                   body: Column(
                     children: [
-                      _buildAppBar(context, state),
-                      Expanded(child: _buildBody(context, state)),
+                      // בטלפון הסרגל נעלם בגלילה למטה וחוזר בגלילה למעלה
+                      // או בהקשה (ChromeAutoHideScope בחלון הראשי).
+                      ChromeAutoHide(child: _buildAppBar(context, state)),
+                      Expanded(
+                        child: ChromeAutoHideScrollListener(
+                          child: _buildBody(context, state),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -1095,7 +1110,13 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
             compact: AppDensity.of(context).isCompact,
           ),
         ),
-        if (state.showLeftPane && NavPanelSearch.isWide(context))
+        if (state.showLeftPane &&
+            (state.pinLeftPane ||
+                NavSidePanel.canPin(
+                  context,
+                  paneWidth: _sidebarWidth.value,
+                  minMainContentWidth: _kNavMinMainContentWidth,
+                )))
           AppTopBarItem(
             widget: NavPanelPinButton(
               isPinned: state.pinLeftPane,
@@ -2309,7 +2330,7 @@ class _TextBookViewerBlocState extends State<TextBookViewerBloc>
           Settings.getValue<bool>(SettingsRepository.keyPinSidebar) ?? false,
       alignment: AlignmentDirectional.centerEnd,
       paneWidth: _sidebarWidth.value,
-      minMainContentWidth: 520,
+      minMainContentWidth: _kNavMinMainContentWidth,
       onClose: () =>
           context.read<TextBookBloc>().add(const ToggleLeftPane(false)),
       paneContent: NavPanelSearchScope(
@@ -2865,7 +2886,7 @@ bool _handleGlobalKeyEvent(
   );
   if (zoomResetShortcut != null &&
       ShortcutHelper.matchesShortcut(event, zoomResetShortcut)) {
-    _setFontSize(context, state, 25.0);
+    _setFontSize(context, state, AppFonts.defaultReadingSize);
     return true;
   }
 

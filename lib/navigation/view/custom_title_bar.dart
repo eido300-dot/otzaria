@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:otzaria/android_update/view/android_update_view.dart';
 
+import 'package:otzaria/theme/app_density.dart';
 import 'package:otzaria/theme/layout_tokens.dart';
 import 'package:otzaria/plugins/view/safe_mode_controls.dart';
 import 'package:otzaria/work_status/work_status_title_chips.dart';
@@ -149,13 +150,6 @@ const double _kTabContentMinWidth = 12.0;
 /// מתחת לרוחב הזה כרטיסייה לא מציגה אייקון סוג (PDF, כלי) ופסים מפרידים.
 const double _kTabIconMinWidth = 100.0;
 
-/// גובה גוף הכרטיסיה, בלי המפריד שלצדה.
-const double _kTabBodyHeight = 32.0;
-
-/// הכרטיסייה מציירת בתוך כל גובה הסרגל, כדי שגלילה לא תחתוך את רקעה.
-/// גוף הכרטיסייה ממורכז, והרקע נמשך עד לתוכן שמתחתיה.
-const double _kTopBarHeight = LayoutConstraints.windowCaptionHeight;
-
 /// הרקע של הכרטיסיה ממשיך מתחת לסרגל בפיקסל אחד: התוכן שמתחתיו מכסה אותו, וקצהו
 /// המוחלק ברוחב שברירי נמהל בצבע הכרטיסיה ולא ברקע הסרגל (קו בהיר דק).
 const double _kTabBottomBleed = 1.0;
@@ -168,6 +162,14 @@ const double _kTabFlareRadius = 15.0;
 typedef _TabWidths = ({double selected, double unselected});
 
 class _CustomTitleBarState extends State<CustomTitleBar> {
+  /// גובה הסרגל, לפי הצפיפות (#4787). הכרטיסייה מציירת בתוך כל גובה הסרגל,
+  /// כדי שגלילה לא תחתוך את רקעה. גוף הכרטיסייה ממורכז, והרקע נמשך עד לתוכן
+  /// שמתחתיה.
+  double get _topBarHeight => AppDensity.of(context).captionHeight;
+
+  /// גובה גוף הכרטיסיה, בלי המפריד שלצדה.
+  double get _tabBodyHeight => AppDensity.of(context).tabBodyHeight;
+
   // האם העכבר נמצא כרגע מעל שורת הטאבים. בעת סגירת טאב כשהעכבר בפנים מקפיאים
   // את רוחב הטאבים (ראה _pinnedTabWidths) כדי שכפתור ה-X של הטאב הבא יישאר תחת
   // הסמן וסגירות רצופות יפעלו.
@@ -298,7 +300,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
             // ולכן היא ממשיכה לתוך סרגל הספר כמו לשונית.
             final regionBorder = AppSurfaces.regionBorder(context);
             final topBar = SizedBox(
-              height: _kTopBarHeight,
+              height: _topBarHeight,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -324,7 +326,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                       children: [
                         // כפתורי פעולה (היסטוריה וכו') - תמיד מוצגים
                         SizedBox(
-                          height: _kTopBarHeight,
+                          height: _topBarHeight,
                           child: Center(child: _buildActionButtons(context)),
                         ),
 
@@ -343,7 +345,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                         // כפתורי חלון (רק בדסקטופ)
                         if (DeviceChrome.hasWindowCaption)
                           SizedBox(
-                            height: _kTopBarHeight,
+                            height: _topBarHeight,
                             child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
@@ -395,6 +397,10 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
             );
 
             if (!stackedTabs) return topBar;
+            // טלפון לאורך: שורה אחת במקום שתיים (כותרת + כרטיסיות).
+            if (!DeviceChrome.hasWindowCaption) {
+              return _buildPhoneChromeRow(context, useReaderStyle);
+            }
 
             return Column(
               mainAxisSize: MainAxisSize.min,
@@ -553,10 +559,14 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
       children: [
         Expanded(
           child: AppDragToMoveArea(
+            // גובה השורה קבוע (כפתורי החלון): בהגדלת טקסט הכותרת מצטמצמת.
             child: Center(
-              child: Text(
-                subtitle != null ? '$title: $subtitle' : title,
-                style: textStyle,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  subtitle != null ? '$title: $subtitle' : title,
+                  style: textStyle,
+                ),
               ),
             ),
           ),
@@ -572,9 +582,12 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
         if (!state.hasOpenTabs) {
           return AppDragToMoveArea(
             child: Center(
-              child: Text(
-                context.settingsText('עיון'),
-                style: Theme.of(context).textTheme.titleMedium,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  context.settingsText('עיון'),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
               ),
             ),
           );
@@ -662,6 +675,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
   }
 
   Widget _buildTabsContent(TabsState state) {
+    final tabsWithTwin = tabsWithTwinTitle(state.tabs);
     // בפריים הראשון עוד אין מדידה; אומדן לפי רוחב המסך, מתוקן בפריים הבא.
     final available = _tabsAreaWidth ?? MediaQuery.sizeOf(context).width;
     _lastComputedTabWidths = _computeTabWidths(available, state.tabs.length);
@@ -698,7 +712,14 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
           behavior: HitTestBehavior.opaque,
           child: SizedBox(
             width: tabWidth,
-            child: _buildTab(context, tab, index, state, tabWidth),
+            child: _buildTab(
+              context,
+              tab,
+              index,
+              state,
+              tabWidth,
+              showLocationInTitle: tabsWithTwin.contains(tab),
+            ),
           ),
         ),
       ),
@@ -862,6 +883,96 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
     );
   }
 
+  /// טלפון לאורך: הכרטיסיות, חיפוש הכרטיסיות ו"עוד" בשורה אחת. ב"עוד":
+  /// היסטוריה, סימניות, שולחנות עבודה, הגדרות התצוגה ומסך מלא, שבמחשב
+  /// ובחלון רחב יושבים בשורת הכותרת עצמה.
+  Widget _buildPhoneChromeRow(BuildContext context, bool useReaderStyle) {
+    final regionBorder = AppSurfaces.regionBorder(context);
+    return Container(
+      height: _topBarHeight,
+      decoration: BoxDecoration(
+        color: useReaderStyle
+            ? AppSurfaces.readerBackground(context)
+            : AppSurfaces.panelBackground(context),
+        border: useReaderStyle && regionBorder == null
+            ? null
+            : Border(
+                bottom: BorderSide(
+                  color:
+                      regionBorder ??
+                      AppSurfaces.subtleDivider(Theme.of(context).colorScheme),
+                ),
+              ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: BlocBuilder<TabsBloc, TabsState>(
+              buildWhen: TabsState.changedBesidesActivePane,
+              builder: (context, state) => state.hasOpenTabs
+                  ? _buildScrollableTabsArea(state)
+                  : Center(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          context.settingsText('עיון'),
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+          const TabSearchButton(
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          if (!kIsWeb && Platform.isAndroid) const AndroidUpdateIndicator(),
+          _buildPhoneMoreMenu(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhoneMoreMenu(BuildContext context) {
+    final canEnterFullscreen =
+        FullscreenHelper.isAllowedInContext(context) &&
+        !context.select((WindowFullscreenCubit cubit) => cubit.state);
+    return AppPopupMenuButton<VoidCallback>(
+      // הסיור מצביע על הגדרות התצוגה, שבטלפון נמצאות כאן.
+      key: TourTargetKeys.of(context).readingSettingsButton,
+      iconData: FluentIcons.more_vertical_24_regular,
+      tooltip: context.settingsText('עוד פעולות'),
+      entries: [
+        AppMenuEntry(
+          value: () => _showHistoryDialog(context),
+          label: context.settingsText('היסטוריה'),
+          icon: FluentIcons.history_24_regular,
+        ),
+        AppMenuEntry(
+          value: () => _showBookmarksDialog(context),
+          label: context.settingsText('סימניות'),
+          icon: FluentIcons.bookmark_24_regular,
+        ),
+        AppMenuEntry(
+          value: () => _showSaveWorkspaceDialog(context),
+          label: context.settingsText('החלף שולחן עבודה'),
+          icon: FluentIcons.add_square_24_regular,
+        ),
+        AppMenuEntry(
+          value: widget.onReadingSettingsPressed ?? showReadingSettingsDialog,
+          label: context.settingsText('הגדרות תצוגת הספרים'),
+          icon: FluentIcons.settings_24_regular,
+        ),
+        if (canEnterFullscreen)
+          AppMenuEntry(
+            value: () => FullscreenHelper.toggleFullscreen(context, true),
+            label: context.settingsText('מסך מלא'),
+            icon: FluentIcons.full_screen_maximize_24_regular,
+          ),
+      ],
+      onSelected: (action) => action(),
+    );
+  }
+
   Widget _buildNarrowTabsRow(BuildContext context) {
     return BlocBuilder<TabsBloc, TabsState>(
       buildWhen: TabsState.changedBesidesActivePane,
@@ -869,7 +980,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
         if (!state.hasOpenTabs) return const SizedBox.shrink();
         return Container(
           color: AppSurfaces.readerBackground(context),
-          height: _kTopBarHeight,
+          height: _topBarHeight,
           child: Row(
             children: [
               Expanded(child: _buildScrollableTabsArea(state)),
@@ -1000,6 +1111,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
     if (color == null) return null;
     return _TabBackgroundPainter(
       color,
+      bodyHeight: _tabBodyHeight,
       borderColor: TabStateColors.border(context, inSelection: inSelection),
       // "לבן" (#2850): הפעילה מוקפת בקו האזורים, שממשיך את הקו של השורה.
       flareOutline: isSelected && !inSelection
@@ -1031,7 +1143,9 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
       hovered: isHovered,
       selected: isSelected,
     );
-    return color == null ? null : _TabBackgroundPainter(color);
+    return color == null
+        ? null
+        : _TabBackgroundPainter(color, bodyHeight: _tabBodyHeight);
   }
 
   /// כרטיסיה שהצטמצמה מתחת ל-[_kTabContentMinWidth]. כל שכבות האינטראקציה
@@ -1062,7 +1176,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
           // אין כאן כותרת כלל, ולכן ה-tooltip הוא הדרך היחידה לזהות את
           // הכרטיסיה — ומוצג בכל שטחה.
           child: Tooltip(
-            message: tab.title,
+            message: tabTooltipOf(tab),
             child: Row(
               children: [
                 Container(
@@ -1077,9 +1191,9 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                 ),
                 Expanded(
                   // ⚠️ גובה **הסרגל** ולא גובה הכרטיסיה — ראו
-                  // [_kTopBarHeight]. הצייר ממרכז את הכרטיסיה בתוכו.
+                  // [_topBarHeight]. הצייר ממרכז את הכרטיסיה בתוכו.
                   child: SizedBox(
-                    height: _kTopBarHeight,
+                    height: _topBarHeight,
                     child: Padding(
                       padding: EdgeInsetsDirectional.only(
                         end: 3,
@@ -1088,7 +1202,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                       // הגובה מפורש: ל-CustomPaint ללא ילד אין גודל טבעי,
                       // והוא היה מתכווץ לאפס — גם הציור וגם שטח הלחיצה.
                       child: CustomPaint(
-                        size: const Size.fromHeight(_kTopBarHeight),
+                        size: Size.fromHeight(_topBarHeight),
                         painter: _tabBackgroundPainter(
                           context,
                           tab,
@@ -1117,8 +1231,9 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
     OpenedTab tab,
     int index,
     TabsState state,
-    double tabWidth,
-  ) {
+    double tabWidth, {
+    required bool showLocationInTitle,
+  }) {
     if (tabWidth < _kTabContentMinWidth) {
       return _buildNarrowTab(context, tab, index, state, tabWidth);
     }
@@ -1146,6 +1261,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
 
     Widget buildTabContent(
       String displayTitle, {
+      String? titleLocation,
       required double paneCloseExtent,
       bool showPaneClose = false,
     }) {
@@ -1171,10 +1287,14 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
         );
       }
 
-      return fadedTitle(displayTitle);
+      return buildFadedTabTitle(context, displayTitle, location: titleLocation);
     }
 
-    Widget buildTabAppearance(String displayTitle, String tooltipMessage) {
+    Widget buildTabAppearance(
+      String displayTitle,
+      String tooltipMessage, [
+      String? titleLocation,
+    ]) {
       final showLeadingDivider = _showLeadingDivider(state, index);
       final colorScheme = Theme.of(context).colorScheme;
 
@@ -1279,10 +1399,10 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
           // שתתכווץ ותטושטש לקראת הסוף. ה-X/נעץ מוצגים רק אם נשאר להם מקום.
           Expanded(
             // ⚠️ גובה **הסרגל** ולא גובה הכרטיסיה, והצייר ממרכז בתוכו.
-            // ראו [_kTopBarHeight]: ציור שיוצא מגבולות ה-widget נחתך
+            // ראו [_topBarHeight]: ציור שיוצא מגבולות ה-widget נחתך
             // ברצועה ברגע שהיא גולשת, וזה היה הקו הבהיר ה"לפעמים".
             child: SizedBox(
-              height: _kTopBarHeight,
+              height: _topBarHeight,
               child: Padding(
                 padding: EdgeInsetsDirectional.only(
                   end: outerPad,
@@ -1306,7 +1426,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                   // לא תזיז את הכותרת והאייקונים.
                   child: Center(
                     child: SizedBox(
-                      height: _kTabBodyHeight,
+                      height: _tabBodyHeight,
                       child: Tab(
                         child: Padding(
                           padding: EdgeInsets.symmetric(horizontal: innerPad),
@@ -1354,6 +1474,7 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
                                 Expanded(
                                   child: buildTabContent(
                                     shownTitle,
+                                    titleLocation: titleLocation,
                                     paneCloseExtent: paneCloseExtent,
                                     showPaneClose: showPaneClose,
                                   ),
@@ -1392,8 +1513,9 @@ class _CustomTitleBarState extends State<CustomTitleBar> {
 
     Widget buildLiveTabAppearance() => LiveTabTitleBuilder(
       tab: tab,
-      builder: (_, displayTitle, tooltipMessage) =>
-          buildTabAppearance(displayTitle, tooltipMessage),
+      showLocationInTitle: showLocationInTitle,
+      builder: (_, displayTitle, tooltipMessage, titleLocation) =>
+          buildTabAppearance(displayTitle, tooltipMessage, titleLocation),
     );
 
     return _wrapWithTabPointer(
@@ -1544,7 +1666,15 @@ class _TabBackgroundPainter extends CustomPainter {
   /// קו סביב הכרטיסיה כולה, כולל הכנפיים, שנפגש בקו התחתון של השורה.
   final Color? flareOutline;
 
-  _TabBackgroundPainter(this.color, {this.borderColor, this.flareOutline});
+  /// גובה גוף הכרטיסיה, שממורכז בגובה הסרגל.
+  final double bodyHeight;
+
+  _TabBackgroundPainter(
+    this.color, {
+    required this.bodyHeight,
+    this.borderColor,
+    this.flareOutline,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1557,9 +1687,9 @@ class _TabBackgroundPainter extends CustomPainter {
     const bottomRadius = _kTabFlareRadius;
 
     // הצורה יושבת בתוך הגבולות, מ-[topInset] ועד `size.height`, ומוסיפה רק
-    // [_kTabBottomBleed] מתחת לסרגל — ראו [_kTopBarHeight]. המירכוז נעשה כאן ולא
+    // [_kTabBottomBleed] מתחת לסרגל — ראו [_topBarHeight]. המירכוז נעשה כאן ולא
     // בפריסה, כי ה-widget מקבל את כל גובה הסרגל והכרטיסיה נמוכה ממנו.
-    final topInset = math.max(0.0, (size.height - _kTabBodyHeight) / 2);
+    final topInset = math.max(0.0, (size.height - bodyHeight) / 2);
 
     path.moveTo(-bottomRadius, size.height + _kTabBottomBleed);
     path.lineTo(-bottomRadius, size.height);
@@ -1663,6 +1793,7 @@ class _TabBackgroundPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _TabBackgroundPainter oldDelegate) =>
       oldDelegate.color != color ||
+      oldDelegate.bodyHeight != bodyHeight ||
       oldDelegate.borderColor != borderColor ||
       oldDelegate.flareOutline != flareOutline;
 }

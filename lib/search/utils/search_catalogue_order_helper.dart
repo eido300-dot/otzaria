@@ -24,6 +24,13 @@ class SearchCatalogueOrderHelper {
     'בית שני',
   ];
 
+  // Sorting visits the top categories repeatedly; cache their fixed ranks
+  // instead of scanning the list for every comparator invocation.
+  static final Map<String, int> _topCategoryRanks = {
+    for (var i = 0; i < _orderedTopCategories.length; i++)
+      _orderedTopCategories[i]: i,
+  };
+
   static List<T> buildOrderedKeys<T>(
     Library library, {
     required T Function(dynamic book) keyOf,
@@ -56,7 +63,8 @@ class SearchCatalogueOrderHelper {
     for (final book in library.offTreeBooks) {
       (book.source.isAttached ? attachedKeys : orderedKeys).add(keyOf(book));
     }
-    return [...orderedKeys, ...attachedKeys];
+    orderedKeys.addAll(attachedKeys);
+    return orderedKeys;
   }
 
   static Map<T, int> buildKeyOrderMap<T>(
@@ -76,8 +84,8 @@ class SearchCatalogueOrderHelper {
     final normalized = cat.title
         .replaceAll('\u05F4', '"')
         .replaceAll('\u05F3', "'");
-    final idx = _orderedTopCategories.indexOf(normalized);
-    return idx >= 0 ? idx : _orderedTopCategories.length + cat.order;
+    return _topCategoryRanks[normalized] ??
+        _orderedTopCategories.length + cat.order;
   }
 
   static int normalizeOrder(int order) =>

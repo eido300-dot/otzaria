@@ -9,6 +9,15 @@ import 'package:otzaria/core/windowing/app_window_keys.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/core/focus_repository.dart';
+import 'package:otzaria/bookmarks/models/bookmark.dart';
+import 'package:otzaria/history/bloc/history_bloc.dart';
+import 'package:otzaria/history/history_repository.dart';
+import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
+import 'package:otzaria/navigation/bloc/navigation_event.dart';
+import 'package:otzaria/navigation/navigation_repository.dart';
+import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
+import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/tabs/tabs_repository.dart';
 import 'package:otzaria/find_ref/find_ref_personal_books_setting.dart';
 import 'package:otzaria/find_ref/bloc/find_ref_bloc.dart';
 import 'package:otzaria/find_ref/bloc/find_ref_event.dart';
@@ -27,6 +36,8 @@ import 'package:otzaria/models/books.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/plugins/services/plugin_search_field_actions_registry.dart';
+import 'package:otzaria/plugins/services/plugin_find_ref_service.dart';
+import 'package:otzaria/plugins/models/plugin_library_book_provider.dart';
 import 'package:otzaria/plugins/services/plugin_search_field_session_service.dart';
 import 'package:otzaria/plugins/view/plugin_search_field_actions.dart';
 import 'package:otzaria/settings/services/per_book_settings_service.dart';
@@ -223,17 +234,30 @@ Future<void> _pumpDialog(
   FindRefDialogHost? host,
   NavigatorObserver? observer,
   String query = '',
+  PluginFindRefService? externalService,
 }) async {
   if (screenSize != null) {
     tester.view.physicalSize = screenSize;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
   }
+  final tabsBloc = TabsBloc(repository: _NoTabsRepository());
+  addTearDown(tabsBloc.close);
+  final historyBloc = HistoryBloc(_EmptyHistoryRepository());
+  addTearDown(historyBloc.close);
+  final navigationBloc = _IgnoringNavigationBloc();
+  addTearDown(navigationBloc.close);
   FocusRepository().findRefSearchController.text = query;
   final bloc = FindRefBloc(
     findRefRepository: repository ?? _FakeRepository(results, error: error),
+    externalService: externalService,
   );
-  addTearDown(bloc.close);
+  addTearDown(() async {
+    // Dispose the dialog and deliver its cancellation before closing the Bloc.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await bloc.close();
+  });
 
   // עץ ריק ביניים מכריח יצירה מחדש של ה-State — פתיחה חדשה של הדיאלוג,
   // ולא עדכון של הקיים.
@@ -257,6 +281,9 @@ Future<void> _pumpDialog(
               providers: [
                 Provider<FocusRepository>.value(value: FocusRepository()),
                 BlocProvider<FindRefBloc>.value(value: bloc),
+                BlocProvider<TabsBloc>.value(value: tabsBloc),
+                BlocProvider<HistoryBloc>.value(value: historyBloc),
+                BlocProvider<NavigationBloc>.value(value: navigationBloc),
               ],
               child: host == null
                   ? const FindRefDialog()
@@ -312,6 +339,299 @@ void main() {
     // המתג נקרא מההגדרות בבניית ה-State, ולכן בדיקה שמפעילה אותו הייתה
     // משפיעה על הבדיקות שאחריה.
     Settings.setValue<bool>('key-find-ref-include-personal-books', false);
+  });
+
+  group('native-only without reference opt-in', () {
+    const legacy = PluginLibraryBookProvider(
+      pluginId: 'legacy',
+      id: 'books',
+      provider: 'legacybooks',
+      title: 'Legacy library',
+    );
+    for (final legacyInstalled in [false, true]) {
+      for (final path in ['', 'תנ"ך, תורה']) {
+        testWidgets('keeps native subtitle ($legacyInstalled, $path)', (
+          tester,
+        ) async {
+          final events = <String>[];
+          final service = PluginFindRefService.forTesting(
+            providers: () => legacyInstalled ? [legacy] : const [],
+            dispatch: (_, topic, _) async => events.add(topic),
+          );
+          await _pumpDialog(
+            tester,
+            results: [_ref('מקור מקומי', path: path)],
+            externalService: service,
+          );
+          await tester.enterText(find.byType(TextField), 'בראשית');
+          await tester.pump(_pastDebounce);
+          await tester.pumpAndSettle();
+          expect(find.text('מקור מקומי'), findsOneWidget);
+          expect(find.text('אוצריא'), findsNothing);
+          final tile = tester.widget<ListTile>(
+            find.ancestor(
+              of: find.text('מקור מקומי'),
+              matching: find.byType(ListTile),
+            ),
+          );
+          if (path.isEmpty) {
+            expect(tile.subtitle, isNull);
+          } else {
+            expect(find.text(path), findsOneWidget);
+          }
+          expect(events, isEmpty);
+        });
+      }
+      testWidgets('preserves restored query and cache ($legacyInstalled)', (
+        tester,
+      ) async {
+        final events = <String>[];
+        final service = PluginFindRefService.forTesting(
+          providers: () => legacyInstalled ? [legacy] : const [],
+          dispatch: (_, topic, _) async => events.add(topic),
+        );
+        final repository = _FakeRepository([_ref('מקור מקומי')]);
+        await _pumpDialog(
+          tester,
+          repository: repository,
+          query: 'בראשית',
+          externalService: service,
+        );
+        await tester.pump(_pastDebounce);
+        expect(repository.calls, 0);
+        await tester.enterText(find.byType(TextField), 'ברכות');
+        await tester.pump(_pastDebounce);
+        await tester.pumpAndSettle();
+        expect(repository.calls, 1);
+        final bloc = tester
+            .element(find.byType(FindRefDialog))
+            .read<FindRefBloc>();
+        final cached = bloc.state;
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(_pastDebounce);
+        expect(bloc.state, same(cached));
+        expect(events, isEmpty);
+      });
+    }
+  });
+
+  group('native external references', () {
+    const provider = PluginLibraryBookProvider(
+      pluginId: 'barilan',
+      id: 'refs',
+      provider: 'barilanrefs',
+      title: 'בר אילן',
+      referenceSearch: true,
+    );
+    final events = <({String topic, Map<String, dynamic> data})>[];
+    late PluginFindRefService service;
+    setUp(() {
+      events.clear();
+      service = PluginFindRefService.forTesting(
+        providers: () => [provider],
+        dispatch: (_, topic, data) async {
+          events.add((topic: topic, data: data));
+        },
+      );
+    });
+
+    Future<void> search(WidgetTester tester) async {
+      await tester.enterText(find.byType(TextField), 'בראשית');
+      await tester.pump(_pastDebounce);
+      await tester.pump(const Duration(milliseconds: 700));
+    }
+
+    void respond() {
+      final id =
+          events
+                  .lastWhere(
+                    (e) => e.topic == PluginFindRefService.requestTopic,
+                  )
+                  .data['requestId']
+              as String;
+      expect(
+        service.respond(
+          'barilan',
+          id,
+          results: const [
+            {'reference': 'בראשית א ב — חיצוני', 'choiceIndex': 0},
+          ],
+        ),
+        true,
+      );
+    }
+
+    testWidgets('restored query reaches an opted-in reference provider', (
+      tester,
+    ) async {
+      await _pumpDialog(tester, query: 'בראשית', externalService: service);
+      await tester.pump(_pastDebounce);
+      await tester.pump(const Duration(milliseconds: 700));
+      expect(
+        events
+            .singleWhere((e) => e.topic == PluginFindRefService.requestTopic)
+            .data['query'],
+        'בראשית',
+      );
+      respond();
+      await tester.pumpAndSettle();
+      expect(find.text('בראשית א ב — חיצוני'), findsOneWidget);
+    });
+
+    testWidgets('external rows support page keys and Ctrl Home/End', (
+      tester,
+    ) async {
+      await _pumpDialog(
+        tester,
+        results: [_ref('מקומי')],
+        externalService: service,
+      );
+      await search(tester);
+      final id =
+          events
+                  .lastWhere(
+                    (e) => e.topic == PluginFindRefService.requestTopic,
+                  )
+                  .data['requestId']
+              as String;
+      service.respond(
+        'barilan',
+        id,
+        results: [
+          for (var i = 0; i < 20; i++)
+            {'reference': 'חיצוני $i', 'choiceIndex': i},
+        ],
+      );
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+      await tester.pumpAndSettle();
+      expect(_selectedTiles(tester).single, startsWith('חיצוני'));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.end);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(_selectedTiles(tester), ['חיצוני 19']);
+      await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+      await tester.pumpAndSettle();
+      expect(_selectedTiles(tester), isNot(['חיצוני 19']));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.home);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(_selectedTiles(tester), ['מקומי']);
+    });
+
+    testWidgets('closing the dialog cancels its outstanding provider request', (
+      tester,
+    ) async {
+      await _pumpDialog(tester, externalService: service);
+      await search(tester);
+      final id =
+          events
+                  .lastWhere(
+                    (e) => e.topic == PluginFindRefService.requestTopic,
+                  )
+                  .data['requestId']
+              as String;
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(service.respond('barilan', id, results: const []), false);
+    });
+
+    testWidgets('local and Bar-Ilan rows share a list and keyboard selection', (
+      tester,
+    ) async {
+      await _pumpDialog(
+        tester,
+        results: [_ref('בראשית א — מקומי')],
+        externalService: service,
+      );
+      await search(tester);
+      respond();
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(ListView), findsOneWidget);
+      expect(find.text('בראשית א — מקומי'), findsOneWidget);
+      expect(find.text('בראשית א ב — חיצוני'), findsOneWidget);
+      expect(find.text('בר אילן'), findsOneWidget);
+      expect(find.text('2 מקורות'), findsOneWidget);
+      expect(
+        events.where((e) => e.topic == PluginFindRefService.openTopic),
+        isEmpty,
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pump();
+      expect(_selectedTiles(tester), ['בראשית א ב — חיצוני']);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(events.last.topic, PluginFindRefService.openTopic);
+      expect(events.last.data['expectedChoice'], 'בראשית א ב — חיצוני');
+    });
+
+    testWidgets('an external singleton waits for an explicit mouse selection', (
+      tester,
+    ) async {
+      await _pumpDialog(tester, externalService: service);
+      await search(tester);
+      respond();
+      await tester.pumpAndSettle();
+      expect(find.byType(ListView), findsOneWidget);
+      expect(find.text('בראשית א ב — חיצוני'), findsOneWidget);
+      expect(
+        events.where((e) => e.topic == PluginFindRefService.openTopic),
+        isEmpty,
+      );
+      await tester.tap(find.text('בראשית א ב — חיצוני'));
+      await tester.pump();
+      final opened = events
+          .where((e) => e.topic == PluginFindRefService.openTopic)
+          .single;
+      expect(opened.data['query'], 'בראשית');
+      expect(opened.data['choiceIndex'], 0);
+      expect(opened.data['expectedChoice'], 'בראשית א ב — חיצוני');
+    });
+
+    testWidgets(
+      'pending Enter opens an external singleton only after it arrives',
+      (tester) async {
+        await _pumpDialog(tester, externalService: service);
+        await search(tester);
+        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await tester.pump();
+        expect(
+          events.where((e) => e.topic == PluginFindRefService.openTopic),
+          isEmpty,
+        );
+        respond();
+        await tester.pump();
+        await tester.pump();
+        expect(
+          events.where((e) => e.topic == PluginFindRefService.openTopic),
+          hasLength(1),
+        );
+      },
+    );
+
+    testWidgets('editing query makes an old external row inert', (
+      tester,
+    ) async {
+      await _pumpDialog(tester, externalService: service);
+      await search(tester);
+      respond();
+      await tester.pump();
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'ברכות');
+      await tester.pump();
+      await tester.tap(find.text('בראשית א ב — חיצוני'));
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(
+        events.where((e) => e.topic == PluginFindRefService.openTopic),
+        isEmpty,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(_pastDebounce);
+    });
   });
 
   testWidgets('שדה ריק מתעדכן ברישום ובהסרת כפתור תוסף', (tester) async {
@@ -1637,4 +1957,50 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
     });
   });
+}
+
+class _NoTabsRepository extends TabsRepository {
+  @override
+  List<OpenedTab> loadTabs({bool newRuntime = false}) => const [];
+
+  @override
+  int loadCurrentTabIndex() => 0;
+
+  @override
+  Future<void> saveTabs(List<OpenedTab> tabs, int currentTabIndex) async {}
+
+  @override
+  Future<void> saveCurrentTabIndex(
+    List<OpenedTab> tabs,
+    int currentTabIndex,
+  ) async {}
+}
+
+class _EmptyHistoryRepository extends HistoryRepository {
+  @override
+  Future<List<Bookmark>> load() async => const [];
+
+  @override
+  Future<List<Bookmark>> mutate(
+    List<Bookmark> Function(List<Bookmark> current) apply,
+  ) async => apply(const []);
+}
+
+class _NoLibraryNavigationRepository implements NavigationRepository {
+  @override
+  Future<bool> checkLibraryIsEmpty() async => false;
+  @override
+  Future<void> refreshLibrary() async {}
+}
+
+/// המסך הראשי אינו חלק מהבדיקה — מעבר המסך נבלע.
+class _IgnoringNavigationBloc extends NavigationBloc {
+  _IgnoringNavigationBloc()
+    : super(
+        repository: _NoLibraryNavigationRepository(),
+        tabsRepository: _NoTabsRepository(),
+      );
+
+  @override
+  void add(NavigationEvent event) {}
 }

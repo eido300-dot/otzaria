@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:otzaria/plugins/models/plugin_reader_selection.dart';
 import 'package:otzaria/plugins/models/plugin_text_normalization.dart';
 import 'package:otzaria/plugins/models/text_source_map.dart';
+import 'package:otzaria/plugins/utils/grapheme_occurrences.dart';
 
 class PluginHighlightAnchorResult {
   final String status;
@@ -50,7 +51,7 @@ class PluginHighlightAnchorService {
         status: 'active',
         range: _rebuildAnchor(
           anchor: anchor,
-          sourceText: sourceText,
+          source: source,
           start: originalStart,
           end: originalEnd,
           sourceHash: sourceHash,
@@ -62,7 +63,7 @@ class PluginHighlightAnchorService {
       );
     }
 
-    final exactCandidates = _findCandidates(source, exact);
+    final exactCandidates = findGraphemeOccurrences(source, exact);
     if (exactCandidates.isNotEmpty) {
       final selected = _selectCandidate(
         candidates: exactCandidates,
@@ -75,10 +76,11 @@ class PluginHighlightAnchorService {
           status: 'active',
           range: _rebuildAnchor(
             anchor: anchor,
-            sourceText: sourceText,
+            source: source,
             start: selected,
             end: selected + exact.length,
             sourceHash: sourceHash,
+            occurrences: exactCandidates,
           ),
           strategy: exactCandidates.length == 1
               ? 'unique-exact-text'
@@ -101,7 +103,7 @@ class PluginHighlightAnchorService {
         status: 'active',
         range: _rebuildAnchor(
           anchor: anchor,
-          sourceText: sourceText,
+          source: source,
           start: candidate.$1,
           end: candidate.$2,
           sourceHash: sourceHash,
@@ -132,19 +134,29 @@ class PluginHighlightAnchorService {
     required int exactLength,
     required PluginTextRangeAnchor anchor,
   }) {
-    final scored =
-        candidates
-            .map(
-              (start) => (
-                start,
-                _contextScore(source, start, start + exactLength, anchor),
-              ),
-            )
-            .toList()
-          ..sort((a, b) => b.$2.compareTo(a.$2));
-    if (scored.first.$2 > 0 &&
-        (scored.length == 1 || scored.first.$2 > scored[1].$2)) {
-      return scored.first.$1;
+    final before = anchor.beforeText.raw.characters.toList(growable: false);
+    final after = anchor.afterText.raw.characters.toList(growable: false);
+    var bestScore = 0;
+    int? bestStart;
+    var tied = false;
+    for (final start in candidates) {
+      final score = _contextScore(
+        source,
+        start,
+        start + exactLength,
+        before,
+        after,
+      );
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = start;
+        tied = false;
+      } else if (score == bestScore) {
+        tied = true;
+      }
+    }
+    if (bestScore > 0 && !tied) {
+      return bestStart;
     }
     final occurrence = anchor.occurrenceIndexInSection;
     if (occurrence >= 0 && occurrence < candidates.length) {
@@ -157,10 +169,9 @@ class PluginHighlightAnchorService {
     List<String> source,
     int start,
     int end,
-    PluginTextRangeAnchor anchor,
+    List<String> before,
+    List<String> after,
   ) {
-    final before = anchor.beforeText.raw.characters.toList(growable: false);
-    final after = anchor.afterText.raw.characters.toList(growable: false);
     var score = 0;
     for (
       var offset = 1;
@@ -199,7 +210,7 @@ class PluginHighlightAnchorService {
     if (normalizedExact.isEmpty) return const [];
     final haystack = normalizedSource.text.characters.toList(growable: false);
     final needle = normalizedExact.characters.toList(growable: false);
-    return _findCandidates(haystack, needle)
+    return findGraphemeOccurrences(haystack, needle)
         .map(
           (start) => (
             normalizedSource.sourceBoundary(start),
@@ -212,24 +223,23 @@ class PluginHighlightAnchorService {
 
   PluginTextRangeAnchor _rebuildAnchor({
     required PluginTextRangeAnchor anchor,
-    required String sourceText,
+    required List<String> source,
     required int start,
     required int end,
     required String sourceHash,
+    List<int>? occurrences,
   }) {
-    final graphemes = sourceText.characters.toList(growable: false);
-    final matches = _findCandidates(
-      graphemes,
-      graphemes.sublist(start, end),
-    );
+    final selected = source.sublist(start, end);
+    final matches = occurrences ?? findGraphemeOccurrences(source, selected);
+    final offsets = _rangeOffsets(source, start, end);
     return PluginTextRangeAnchor(
       layer: 'source',
       sourceTextHash: sourceHash,
-      start: _offset(graphemes, start),
-      end: _offset(graphemes, end),
-      exactText: graphemes.sublist(start, end).join(),
-      beforeText: _context(graphemes, start, before: true, anchor: anchor),
-      afterText: _context(graphemes, end, before: false, anchor: anchor),
+      start: offsets.start,
+      end: offsets.end,
+      exactText: selected.join(),
+      beforeText: _context(source, start, before: true, anchor: anchor),
+      afterText: _context(source, end, before: false, anchor: anchor),
       occurrenceIndexInSection: matches.indexOf(start),
       occurrenceCountInSection: matches.length,
       normalizationProfile: anchor.normalizationProfile,
@@ -266,22 +276,32 @@ class PluginHighlightAnchorService {
     );
   }
 
-  PluginTextOffset _offset(List<String> graphemes, int boundary) {
-    final prefix = graphemes.take(boundary).join();
-    return PluginTextOffset(
-      grapheme: boundary,
-      codePoint: prefix.runes.length,
-      utf16: prefix.length,
-    );
-  }
-
-  List<int> _findCandidates(List<String> source, List<String> exact) {
-    if (exact.isEmpty || exact.length > source.length) return const [];
-    final result = <int>[];
-    for (var start = 0; start <= source.length - exact.length; start++) {
-      if (_matches(source, exact, start)) result.add(start);
+  ({PluginTextOffset start, PluginTextOffset end}) _rangeOffsets(
+    List<String> source,
+    int start,
+    int end,
+  ) {
+    var codePoint = 0;
+    var utf16 = 0;
+    for (var index = 0; index < start; index++) {
+      final grapheme = source[index];
+      utf16 += grapheme.length;
+      codePoint += grapheme.length == 1 ? 1 : grapheme.runes.length;
     }
-    return result;
+    final startOffset = PluginTextOffset(
+      grapheme: start,
+      codePoint: codePoint,
+      utf16: utf16,
+    );
+    for (var index = start; index < end; index++) {
+      final grapheme = source[index];
+      utf16 += grapheme.length;
+      codePoint += grapheme.length == 1 ? 1 : grapheme.runes.length;
+    }
+    return (
+      start: startOffset,
+      end: PluginTextOffset(grapheme: end, codePoint: codePoint, utf16: utf16),
+    );
   }
 
   bool _matches(List<String> source, List<String> exact, int start) {

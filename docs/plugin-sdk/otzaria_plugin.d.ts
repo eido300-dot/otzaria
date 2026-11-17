@@ -946,6 +946,28 @@ export interface UiSetUnsavedChangesArgs {
   message?: string;
 }
 
+/**
+ * ארגומנטים ל-`ui.setTabInfo`. חובה לפחות אחד מהשדות.
+ *
+ * שדה חסר — ללא שינוי. `null`, מחרוזת ריקה או רווחים בלבד — חזרה לברירת
+ * המחדל (שם התוסף; הטולטיפ הרגיל). `title` עד 80 תווים, שורה אחת; `tooltip`
+ * עד 300 תווים, ושורות חדשות נשמרות. ארוך מזה נחתך.
+ */
+export interface UiSetTabInfoArgs {
+  title?: string | null;
+  tooltip?: string | null;
+}
+
+/**
+ * ארגומנטים ל-`ui.setFullscreen` (מ-0.9.99).
+ *
+ * `true` נכנס למסך מלא של אוצריא — רק מפעולת משתמש, ורק במסך העיון. `false`
+ * יוצא. Escape ו"חזור" יוצאים תמיד, בלי לשאול את התוסף.
+ */
+export interface UiSetFullscreenArgs {
+  fullscreen: boolean;
+}
+
 /** ארגומנטים ל-`bookmarks.add`. הספר מזוהה ב-`id` או ב-`bookId`. */
 export interface BookmarkAddArgs extends BookIdentity {
   index?: number;
@@ -1995,6 +2017,19 @@ export interface OtzariaEventMap {
     title: string;
     author?: string;
   };
+  'findRef.external.requested': {
+    requestId: string;
+    provider: string;
+    query: string;
+    limit: number;
+  };
+  'findRef.external.cancelled': { requestId: string };
+  'findRef.external.openRequested': {
+    provider: string;
+    query: string;
+    choiceIndex: number;
+    expectedChoice: string;
+  };
   /** In-book search request sent only to the plugin owning `provider`. */
   'reader.inBookSearch.requested': {
     requestId: string;
@@ -2591,6 +2626,7 @@ export type OtzariaMethod =
   | 'reader.openSearchTab'
   | 'reader.registerExternalSearchProvider'
   | 'reader.respondExternalSearch'
+  | 'reader.respondFindRef'
   | 'reader.getCurrentState'
   | 'reader.getCurrentRef'
   | 'reader.closeTab'
@@ -2633,6 +2669,8 @@ export type OtzariaMethod =
   | 'ui.printFile'
   | 'ui.exportPdf'
   | 'ui.setUnsavedChanges'
+  | 'ui.setTabInfo'
+  | 'ui.setFullscreen'
   | 'fs.extractZip'
   | 'fs.deleteFile'
   | 'fs.pickUserFile'
@@ -2893,6 +2931,17 @@ export interface OtzariaGlobal {
     method: 'ui.printFile',
     payload: { token: string; jobName?: string }
   ): Promise<OtzariaResponse<{ printed: boolean }>>;
+
+  /**
+   * Sets the title and/or tooltip of this plugin instance's own tab. A missing
+   * field is left as is; null or an empty string restores the default. Resolves
+   * to false when the instance has no tab (e.g. a background instance).
+   * Since 0.9.99.
+   */
+  call(
+    method: 'ui.setTabInfo',
+    payload: UiSetTabInfoArgs
+  ): Promise<OtzariaResponse<boolean>>;
 
   call(
     method: 'feedback.submitBookCorrection',

@@ -3,7 +3,9 @@ import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/theme/theme_exports.dart';
 import 'package:otzaria/widgets/layout/adaptive_side_pane.dart';
 import 'package:otzaria/widgets/misc/animated_pin_button.dart';
+import 'package:otzaria/widgets/navigation/nav_panel_search.dart';
 import 'package:otzaria/widgets/navigation/panel_tab_header.dart';
+import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
 
 /// חלונית הניווט האחידה של האפליקציה — מקור האמת היחיד למראה שלה.
 ///
@@ -58,6 +60,25 @@ class NavSidePanel extends StatelessWidget {
     this.isPinned = true,
     this.isGloballyPinned = false,
   });
+
+  /// האם לחלונית יש מקום להידחק ליד התוכן, כלומר האם נעיצה משנה משהו. בחלון
+  /// צר החלונית נפתחת כ-overlay גם כשהיא נעוצה, ולכן כפתור הנעיצה מוצג רק
+  /// כשהתשובה היא true, או לביטול נעיצה קיימת (issue #5202).
+  ///
+  /// המדידה היא של החלונית ([NavPanelPaneWidthScope]) ולא של החלון, כמו
+  /// בפריסה עצמה. [paneWidth] ו-[minMainContentWidth] הם אלה שהמסך מעביר
+  /// ל-[NavSidePanel].
+  static bool canPin(
+    BuildContext context, {
+    required double paneWidth,
+    double minMainContentWidth = LayoutConstraints.mainContentMinWidth,
+  }) => AdaptiveSidePane.fitsSideBySide(
+    availableWidth:
+        NavPanelPaneWidthScope.maybeOf(context) ??
+        MediaQuery.sizeOf(context).width,
+    occupiedByPane: paneWidth,
+    minMainContentWidth: minMainContentWidth,
+  );
 
   /// רקע חלונית הניווט — צבע הסרגל העליון, כדי שהחלונית תיראה כהמשך שלו.
   static Color background(BuildContext context) =>
@@ -194,10 +215,10 @@ class NavPanelPinButton extends StatelessWidget {
     return AnimatedPinButton(
       isPinned: effectivePinned,
       tooltip: isGloballyPinned
-          ? 'החלונית נעוצה לפי ההגדרות'
+          ? context.settingsText('החלונית נעוצה לפי ההגדרות')
           : effectivePinned
-          ? 'בטל נעיצה'
-          : 'נעץ את החלונית',
+          ? context.settingsText('בטל נעיצה')
+          : context.settingsText('נעץ את החלונית'),
       onPressed: isGloballyPinned ? null : onToggle,
     );
   }
@@ -233,7 +254,9 @@ class NavPanelToggleButton extends StatelessWidget {
       textDirection: Directionality.of(context),
     );
     return IconButton(
-      tooltip: isOpen ? 'הסתר ניווט' : 'הצג ניווט',
+      tooltip: isOpen
+          ? context.settingsText('הסתר ניווט')
+          : context.settingsText('הצג ניווט'),
       onPressed: onToggle,
       visualDensity: VisualDensity.standard,
       splashRadius: 22,

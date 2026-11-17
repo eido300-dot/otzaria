@@ -137,7 +137,14 @@ class _RecordingTextSearcher extends PdfTextSearchSession {
       searchImmediately: searchImmediately,
       goToFirstMatch: goToFirstMatch,
     ));
+    if (startPageNumber != null) startPages.add(startPageNumber);
   }
+
+  /// העמודים שהסריקה הוקדמה אליהם.
+  final startPages = <int>[];
+
+  @override
+  Pattern? get pattern => searches.lastOrNull;
 
   @override
   Future<PdfPageText?> loadText({required int pageNumber}) async => PdfPageText(
@@ -227,6 +234,19 @@ class _CountingMatch extends Fake implements PdfTextSearchResult {
   int get end => 4;
   @override
   int get pageTextLength => line.length;
+}
+
+class _CountingSpanMatch extends Fake implements PdfTextSearchResult {
+  _CountingSpanMatch(this._text);
+
+  final String _text;
+  int reads = 0;
+
+  @override
+  String get text {
+    reads++;
+    return _text;
+  }
 }
 
 /// שכבת טקסט של PDF סרוק בלי אף אות עברית — פיסוק וספרות בלבד.
@@ -735,6 +755,37 @@ Future<void> main() async {
       expect(searcher.navigatedTo, [1, 0]);
     });
 
+    testWidgets('בחירות חוזרות שומרות על סדר רצפים זהים בעמוד', (tester) async {
+      const query = 'ממון לו תובעין';
+      final searcher = await _pumpSearchView(
+        tester,
+        pageFullText: 'ממון שאין לו תובעין $query $query',
+        initialQuery: query,
+        initialSearchMode: SearchMode.advanced,
+        searchRepository: const _PageResultsRepository([
+          'תחילה <font>ממון</font> <font>לו</font> <font>תובעין</font>',
+          'שנית <font>ממון</font> <font>לו</font> <font>תובעין</font>',
+        ]),
+      );
+      final matches = [
+        _CountingSpanMatch('ממון שאין לו תובעין'),
+        _CountingSpanMatch('מָמוֹן לו תובעין'),
+        _CountingSpanMatch('ממון לו תובעין'),
+      ];
+      searcher.fakeMatches = matches;
+      searcher.pageScanned = true;
+      await _settleWithoutTime(tester);
+
+      final tiles = find.byType(SearchResultTile);
+      for (final tile in [tiles.last, tiles.first, tiles.last]) {
+        await tester.tap(tile);
+        await _settleWithoutTime(tester);
+      }
+
+      expect(searcher.navigatedTo, [2, 1, 2]);
+      expect(matches.map((match) => match.reads), [1, 1, 1]);
+    });
+
     group('לחיצה שממתינה לסריקת העמוד', () {
       const page = 'ממון שאין לו תובעין והיה ממון לו תובעין';
       const near = 'ממון לו תובעין';
@@ -796,6 +847,30 @@ Future<void> main() async {
           },
         );
       }
+
+      testWidgets('קפיצה לעמוד שטרם נסרק מקדימה את הסריקה אליו', (
+        tester,
+      ) async {
+        final controller = _FakeReadyController(viewerPage: 3, canReveal: true);
+        final searcher = await _pumpSearchView(
+          tester,
+          pageFullText: page,
+          initialQuery: near,
+          initialSearchMode: SearchMode.advanced,
+          searchRepository: _OneResultRepository(),
+          controller: controller,
+        );
+        searcher.scanning = true;
+        await _settleWithoutTime(tester);
+        final highlight = searcher.searches.last;
+        await tester.tap(find.byType(SearchResultTile).first);
+        await _settleWithoutTime(tester);
+        expect(searcher.startPages, [5]);
+        expect(searcher.searches.last, same(highlight));
+        searcher.finishPageScan(ranges);
+        await _settleWithoutTime(tester);
+        expect(searcher.navigatedTo, [0]);
+      });
 
       testWidgets('סריקה שמסתיימת בזמן אנימציית הקפיצה אינה משאירה המתנה', (
         tester,
