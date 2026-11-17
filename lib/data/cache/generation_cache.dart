@@ -138,6 +138,10 @@ class GenerationCache {
   /// בקובץ מסד. הדורות של seforim.db ו-user_books.db אינם נקראים שוב.
   /// [warmUp] ממתין לה, כך שהקורא אינו חייב להמתין בעצמו.
   Future<void> reloadAttached() {
+    // Concurrent callers share a single refresh instead of launching
+    // duplicate SQLite reads and isolates for every attached library.
+    final active = _attachedReload;
+    if (active != null) return active;
     late final Future<void> reload;
     reload = _reloadAttached().whenComplete(() {
       if (identical(_attachedReload, reload)) _attachedReload = null;
