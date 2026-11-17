@@ -80,6 +80,7 @@ class _VerticalReadingTabStripState extends State<VerticalReadingTabStrip> {
 
         if (!state.hasOpenTabs) return const SizedBox.shrink();
 
+        final tabsWithTwin = tabsWithTwinTitle(state.tabs);
         return buildTabsReadingTabStrip(
           context,
           state: state,
@@ -90,7 +91,13 @@ class _VerticalReadingTabStripState extends State<VerticalReadingTabStrip> {
           widths: [for (final _ in state.tabs) kVerticalTabHeight],
           tabBuilder: (tab, index, extent) => SizedBox(
             height: extent,
-            child: _buildTab(context, tab, index, state),
+            child: _buildTab(
+              context,
+              tab,
+              index,
+              state,
+              showLocationInTitle: tabsWithTwin.contains(tab),
+            ),
           ),
         );
       },
@@ -101,8 +108,9 @@ class _VerticalReadingTabStripState extends State<VerticalReadingTabStrip> {
     BuildContext context,
     OpenedTab tab,
     int index,
-    TabsState state,
-  ) {
+    TabsState state, {
+    required bool showLocationInTitle,
+  }) {
     return _wrapWithTabPointer(
       context,
       tab,
@@ -131,6 +139,7 @@ class _VerticalReadingTabStripState extends State<VerticalReadingTabStrip> {
                 isSelected: index == state.currentTabIndex,
                 isInSelection: state.selectedTabs.contains(tab),
                 isHovered: isHovered,
+                showLocationInTitle: showLocationInTitle,
                 onClose: () => _closeTab(tab),
               ),
             );
@@ -198,6 +207,7 @@ class _VerticalTabRow extends StatelessWidget {
   final bool isSelected;
   final bool isInSelection;
   final bool isHovered;
+  final bool showLocationInTitle;
   final VoidCallback onClose;
 
   const _VerticalTabRow({
@@ -206,6 +216,7 @@ class _VerticalTabRow extends StatelessWidget {
     required this.isSelected,
     required this.isInSelection,
     required this.isHovered,
+    required this.showLocationInTitle,
     required this.onClose,
   });
 
@@ -251,7 +262,9 @@ class _VerticalTabRow extends StatelessWidget {
             ),
             child: LiveTabTitleBuilder(
               tab: tab,
-              builder: (context, displayTitle, tooltipMessage) => collapsed
+              showLocationInTitle: showLocationInTitle,
+              builder: (context, displayTitle, tooltipMessage, titleLocation) =>
+                  collapsed
                   // במצב מכווץ מוצג אייקון בלבד, ולכן ה-tooltip הוא המקור היחיד לשם.
                   ? Stack(
                       children: [
@@ -294,6 +307,7 @@ class _VerticalTabRow extends StatelessWidget {
                             child: buildFadedTabTitle(
                               context,
                               tabTitleBesideContentIcon(tab, displayTitle),
+                              location: titleLocation,
                             ),
                           ),
                         ),

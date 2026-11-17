@@ -30,6 +30,92 @@ void main() {
     expect(range.end, 15);
   });
 
+  test('range lookup handles missing matches and hints outside the text', () {
+    const text = 'אב אב אב';
+    expect(
+      service.locateRenderedRange(renderedText: text, selectedText: ''),
+      isNull,
+    );
+    expect(
+      service.locateRenderedRange(renderedText: text, selectedText: 'גד'),
+      isNull,
+    );
+    for (final entry in [(null, 0), (-10, 0), (3, 3), (100, 6)]) {
+      final range = service.locateRenderedRange(
+        renderedText: text,
+        selectedText: 'אב',
+        startHint: entry.$1,
+      );
+      expect(range, (start: entry.$2, end: entry.$2 + 2));
+    }
+  });
+
+  test('range lookup preserves overlapping matches', () {
+    final range = service.locateRenderedRange(
+      renderedText: 'אאאא',
+      selectedText: 'אא',
+      startHint: 1,
+    );
+    expect(range, (start: 1, end: 3));
+  });
+
+  test('equal-distance hints consistently choose the earlier occurrence', () {
+    final range = service.locateRenderedRange(
+      renderedText: List.filled(80, 'א ').join(),
+      selectedText: 'א',
+      startHint: 79,
+    );
+    expect(range, (start: 78, end: 79));
+  });
+
+  test('range hints use UTF-16 positions around emoji and nikud', () {
+    final range = service.locateRenderedRange(
+      renderedText: '🙂אָ|🙂אָ',
+      selectedText: '🙂אָ',
+      startHint: 4,
+    );
+    expect(range, (start: 5, end: 9));
+  });
+
+  test('normalized equal-distance hints prefer the earlier source range', () {
+    final selection = service.buildFromRenderedSelection(
+      bookId: 'book',
+      bookTitle: 'ספר',
+      sectionIndex: 0,
+      rawText: 'אב  גד || אב\tגד',
+      settings: const RenderSettings(
+        replaceHolyNames: false,
+        formatParentheses: false,
+      ),
+      selectedText: 'אב גד',
+      startHint: 5,
+    );
+    expect(selection?.sourceRange.start.utf16, 0);
+    expect(selection?.sourceRange.end.utf16, 6);
+    expect(selection?.sourceSelectedText, 'אב  גד');
+  });
+
+  test('normalized selection chooses the nearest original-text occurrence', () {
+    const settings = RenderSettings(
+      replaceHolyNames: false,
+      formatParentheses: false,
+    );
+    const rawText = 'אב  גד | אב\tגד';
+    final selection = service.buildFromRenderedSelection(
+      bookId: 'book',
+      bookTitle: 'ספר',
+      sectionIndex: 0,
+      rawText: rawText,
+      settings: settings,
+      selectedText: 'אב גד',
+      startHint: 100,
+    );
+    expect(selection, isNotNull);
+    expect(selection!.sourceRange.start.utf16, 9);
+    expect(selection.sourceRange.end.utf16, 14);
+    expect(selection.sourceSelectedText, 'אב\tגד');
+  });
+
   test('maps a displayed holy-name replacement back to the source', () {
     const settings = RenderSettings(
       replaceHolyNames: true,
@@ -368,6 +454,66 @@ void main() {
     expect(anchors[2]!.occurrenceIndexInSection, 2);
     expect(anchors[2]!.startWordIndex, 2);
     expect(anchors[3], isNull);
+  });
+
+  test('anchors long overlapping ranges in repeated text', () {
+    final text = List.filled(8192, 'א').join();
+    final query = List.filled(512, 'א').join();
+    final anchors = service.buildRangeAnchors(
+      text: text,
+      ranges: const [
+        (startGrapheme: 0, endGrapheme: 512),
+        (startGrapheme: 17, endGrapheme: 529),
+        (startGrapheme: 7000, endGrapheme: 7512),
+      ],
+      layer: 'source',
+    );
+
+    expect(anchors.map((anchor) => anchor!.exactText), [query, query, query]);
+    expect(anchors.map((anchor) => anchor!.occurrenceIndexInSection), [
+      0,
+      17,
+      7000,
+    ]);
+    expect(anchors.map((anchor) => anchor!.occurrenceCountInSection), [
+      7681,
+      7681,
+      7681,
+    ]);
+  });
+
+  test('overlapping batch anchors preserve grapheme and Unicode offsets', () {
+    final anchors = service.buildRangeAnchors(
+      text: '🙂אָאָאָ🙂אָאָ',
+      ranges: const [
+        (startGrapheme: 1, endGrapheme: 3),
+        (startGrapheme: 2, endGrapheme: 4),
+        (startGrapheme: 5, endGrapheme: 7),
+      ],
+      layer: 'rendered',
+      renderedTextHash: 'hash',
+    );
+
+    expect(anchors.map((anchor) => anchor!.exactText), [
+      'אָאָ',
+      'אָאָ',
+      'אָאָ',
+    ]);
+    expect(anchors.map((anchor) => anchor!.occurrenceIndexInSection), [
+      0,
+      1,
+      2,
+    ]);
+    expect(anchors.map((anchor) => anchor!.occurrenceCountInSection), [
+      3,
+      3,
+      3,
+    ]);
+    expect(anchors.map((anchor) => anchor!.start.codePoint), [1, 3, 8]);
+    expect(anchors.map((anchor) => anchor!.end.codePoint), [5, 7, 12]);
+    expect(anchors.map((anchor) => anchor!.start.utf16), [2, 4, 10]);
+    expect(anchors.map((anchor) => anchor!.end.utf16), [6, 8, 14]);
+    expect(anchors.last!.renderedTextHash, 'hash');
   });
 
   group('buildMultiSectionPayload', () {
