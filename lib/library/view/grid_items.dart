@@ -130,22 +130,6 @@ Widget _buildBookIconChild(Book book, ColorScheme cs, double iconSize) {
 
 final _libraryOverflowCache = newTextOverflowCache();
 
-Decoration _libraryTooltipDecoration(BuildContext context) {
-  final cs = Theme.of(context).colorScheme;
-  return BoxDecoration(
-    color: cs.surfaceContainerHigh,
-    borderRadius: AppTokens.borderRadiusAll,
-  );
-}
-
-TextStyle _libraryTooltipTextStyle(BuildContext context) {
-  final theme = Theme.of(context);
-  return (theme.textTheme.bodyMedium ?? const TextStyle()).copyWith(
-    color: theme.colorScheme.onSurface,
-    height: 1.3,
-  );
-}
-
 /// כפתור "פרטים" של פריט ברשת, עם [tooltip] מלא כשיש.
 Widget _libraryInfoButton(
   BuildContext context, {
@@ -179,8 +163,6 @@ Widget _libraryInfoButton(
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
     margin: const EdgeInsets.all(12),
     constraints: const BoxConstraints(maxWidth: 320),
-    textStyle: _libraryTooltipTextStyle(context),
-    decoration: _libraryTooltipDecoration(context),
     child: button,
   );
 }
@@ -200,52 +182,21 @@ class LibraryOverflowTooltipText extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    final resolvedStyle = style ?? DefaultTextStyle.of(context).style;
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final hasOverflow =
-            constraints.maxWidth.isFinite &&
-            constraints.maxWidth > 0 &&
-            textOverflows(
-              context: context,
-              text: text,
-              style: resolvedStyle,
-              maxLines: maxLines,
-              maxWidth: constraints.maxWidth,
-              textAlign: textAlign,
-              cache: _libraryOverflowCache,
-            );
-
-        final child = Text(
-          text,
-          maxLines: maxLines,
-          overflow: TextOverflow.ellipsis,
-          textAlign: textAlign,
-          style: resolvedStyle,
-        );
-
-        if (!hasOverflow) {
-          return child;
-        }
-
-        return Tooltip(
-          message: text,
-          waitDuration: const Duration(milliseconds: 300),
-          preferBelow: false,
-          verticalOffset: 18,
-          textAlign: TextAlign.right,
-          textStyle: _libraryTooltipTextStyle(context),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          margin: const EdgeInsets.all(12),
-          constraints: const BoxConstraints(maxWidth: 260),
-          decoration: _libraryTooltipDecoration(context),
-          child: child,
-        );
-      },
-    );
-  }
+  Widget build(BuildContext context) => OverflowTooltipText(
+    text: text,
+    style: style,
+    maxLines: maxLines,
+    textAlign: textAlign,
+    cache: _libraryOverflowCache,
+    tooltipTheme: TooltipTheme.of(context).copyWith(
+      preferBelow: false,
+      verticalOffset: 18,
+      textAlign: TextAlign.right,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: const EdgeInsets.all(12),
+      constraints: const BoxConstraints(maxWidth: 260),
+    ),
+  );
 }
 
 class LibraryItemTitle extends StatelessWidget {
@@ -280,6 +231,12 @@ class LibraryItemTitle extends StatelessWidget {
   }
 }
 
+/// רקע תג האייקון בכרטיס. בכרטיס נבחר הרקע הוא [AppSurfaces.selectedRow],
+/// אותו גוון כמו התג, ולכן התג בצבע הכרטיס.
+Color _iconBadgeColor(BuildContext context, bool cardSelected) => cardSelected
+    ? AppSurfaces.card(context)
+    : Theme.of(context).colorScheme.secondaryContainer;
+
 class CategoryGridItem extends StatelessWidget {
   final Category category;
   final VoidCallback onCategoryClickCallback;
@@ -310,7 +267,7 @@ class CategoryGridItem extends StatelessWidget {
       width: 32,
       height: 32,
       decoration: BoxDecoration(
-        color: cs.secondaryContainer,
+        color: _iconBadgeColor(context, isSelected),
         borderRadius: AppTokens.borderRadiusAll,
       ),
       child: Icon(
@@ -394,6 +351,9 @@ class CategoryGridItem extends StatelessWidget {
 class BookGridItem extends StatelessWidget {
   final bool showTopics;
   final bool isSelected;
+
+  /// הספר נבחר לפתיחה מרובה: וי במקום סמל הפורמט.
+  final bool isChecked;
   final Book book;
   final VoidCallback onBookClickCallback;
   final VoidCallback? onBookDeleted;
@@ -406,6 +366,7 @@ class BookGridItem extends StatelessWidget {
     required this.onBookClickCallback,
     this.showTopics = false,
     this.isSelected = false,
+    this.isChecked = false,
     this.onBookDeleted,
     this.focusNode,
     this.onFocused,
@@ -439,7 +400,11 @@ class BookGridItem extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   mainAxisSize: MainAxisSize.max,
                   children: [
-                    _BookGridMediaColumn(book: book),
+                    _BookGridMediaColumn(
+                      book: book,
+                      isChecked: isChecked,
+                      isSelected: isSelected,
+                    ),
                     _BookGridActionColumn(
                       book: book,
                       onBookDeleted: onBookDeleted,
@@ -457,8 +422,14 @@ class BookGridItem extends StatelessWidget {
 
 class _BookGridMediaColumn extends StatelessWidget {
   final Book book;
+  final bool isChecked;
+  final bool isSelected;
 
-  const _BookGridMediaColumn({required this.book});
+  const _BookGridMediaColumn({
+    required this.book,
+    required this.isChecked,
+    required this.isSelected,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -471,11 +442,17 @@ class _BookGridMediaColumn extends StatelessWidget {
       width: iconBoxSize,
       height: iconBoxSize,
       decoration: BoxDecoration(
-        color: cs.secondaryContainer,
+        color: isChecked ? cs.primary : _iconBadgeColor(context, isSelected),
         borderRadius: AppTokens.borderRadiusAll,
       ),
       child: Center(
-        child: _buildBookIconChild(book, cs, iconSize),
+        child: isChecked
+            ? Icon(
+                FluentIcons.checkmark_24_regular,
+                color: cs.onPrimary,
+                size: iconSize,
+              )
+            : _buildBookIconChild(book, cs, iconSize),
       ),
     );
 
@@ -1193,11 +1170,13 @@ class LibraryGridKeyNavigator extends StatelessWidget {
 }
 
 class MyGridView extends StatelessWidget {
-  final List<Widget> items;
+  final List<Widget> _items;
+  final int? _itemCount;
+  final IndexedWidgetBuilder? _itemBuilder;
   final VoidCallback? onExitTop;
   final double minItemHeight;
 
-  /// כמה מהפריטים הראשונים ב-[items] הם כרטיסי תיקייה. בתצוגה צרה הם
+  /// כמה מהפריטים הראשונים הם כרטיסי תיקייה. בתצוגה צרה הם
   /// בשורות נמוכות משלהם ([kNarrowCategoryCardHeight]), והספרים שאחריהם
   /// מתחילים בשורה חדשה בגובה הרגיל.
   final int leadingCategoryCount;
@@ -1208,18 +1187,34 @@ class MyGridView extends StatelessWidget {
 
   const MyGridView({
     super.key,
-    required this.items,
+    required this._items,
     this.onExitTop,
     this.minItemHeight = 0,
     this.leadingCategoryCount = 0,
     this.scrollable = false,
     this.controller,
-  });
+  }) : _itemCount = null,
+       _itemBuilder = null;
+
+  const MyGridView.builder({
+    super.key,
+    required int itemCount,
+    required this._itemBuilder,
+    this.onExitTop,
+    this.minItemHeight = 0,
+    this.leadingCategoryCount = 0,
+    this.scrollable = false,
+    this.controller,
+  }) : assert(itemCount >= 0),
+       assert(_itemBuilder != null),
+       _items = const [],
+       _itemCount = itemCount;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
+        final itemCount = _itemCount ?? _items.length;
         final textScale = MediaQuery.textScalerOf(context).scale(1.0);
         final width = constraints.maxWidth;
         final baseRatio = width >= _kGridWideMinWidth
@@ -1255,7 +1250,7 @@ class MyGridView extends StatelessWidget {
 
         // בתצוגה צרה כרטיסי התיקייה נמוכים מכרטיסי הספר (ss4).
         final categoryCount = width < _kGridNarrowBelow && minItemHeight <= 0
-            ? min(leadingCategoryCount, items.length)
+            ? min(leadingCategoryCount, itemCount)
             : 0;
         final SliverGridDelegate gridDelegate = categoryCount > 0
             ? LibraryBandedGridDelegate(
@@ -1314,10 +1309,14 @@ class MyGridView extends StatelessWidget {
                 _kGridPadding,
               ),
               gridDelegate: gridDelegate,
-              itemCount: items.length,
-              itemBuilder: (context, index) => scrollable
-                  ? _FocusedGridItemKeepAlive(child: items[index])
-                  : items[index],
+              itemCount: itemCount,
+              itemBuilder: (context, index) {
+                final item =
+                    _itemBuilder?.call(context, index) ?? _items[index];
+                return scrollable
+                    ? _FocusedGridItemKeepAlive(child: item)
+                    : item;
+              },
               shrinkWrap: !scrollable,
               physics: scrollable ? null : const NeverScrollableScrollPhysics(),
             ),

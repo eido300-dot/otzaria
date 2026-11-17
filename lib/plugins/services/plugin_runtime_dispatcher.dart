@@ -164,6 +164,8 @@ class _WindowVisibility {
   bool minimized = false;
 
   bool get isForeground => readerScreenVisible && shown && !minimized;
+
+  bool get showsPlugins => isForeground && visibleKeys.isNotEmpty;
 }
 
 class PluginRuntimeDispatcher {
@@ -836,7 +838,9 @@ class PluginRuntimeDispatcher {
   void setVisiblePluginInstances(Set<PluginInstanceKey> keys, {int? viewId}) {
     final window = _window(viewId);
     if (setEquals(window.visibleKeys, keys)) return;
+    final showedPlugins = window.showsPlugins;
     window.visibleKeys = Set.unmodifiable(keys);
+    _reclaimKeyboardIfPluginsLeft(window, showedPlugins, viewId);
     _scheduleForegroundReconciliation();
   }
 
@@ -844,8 +848,20 @@ class PluginRuntimeDispatcher {
   void setReaderScreenVisible(bool visible, {int? viewId}) {
     final window = _window(viewId);
     if (window.readerScreenVisible == visible) return;
+    final showedPlugins = window.showsPlugins;
     window.readerScreenVisible = visible;
+    _reclaimKeyboardIfPluginsLeft(window, showedPlugins, viewId);
     _scheduleForegroundReconciliation();
+  }
+
+  void _reclaimKeyboardIfPluginsLeft(
+    _WindowVisibility window,
+    bool showedPlugins,
+    int? viewId,
+  ) {
+    if (showedPlugins && !window.showsPlugins) {
+      returnKeyboardFromHiddenPluginWebView(viewId ?? mainViewId);
+    }
   }
 
   /// מעדכן אם החלון עצמו מוצג. חלון שנסגר מוסתר ולא נהרס, ובלי זה
@@ -1924,15 +1940,14 @@ class PluginRuntimeDispatcher {
     }
   }
 
-  /// שולח event לפלאגין ספציפי בלבד (ללא בדיקת הרשאת subscribe).
-  /// משמש לאירועים ממוקדים כמו reader.context_menu_item_clicked.
-  /// עם [instanceId] האירוע נמסר למופע הזה בלבד; בלעדיו — הלוגיקה הקיימת
-  /// (רקע / קדמי ראשי / החייאה).
+  /// שולח אירוע ממוקד; [instanceId] מגביל את המסירה למופע מסוים.
+  /// [allowPageLaunch]=false מונע פתיחת דף ומכשיל Future שהושמט ללא מנוע.
   Future<void> dispatchEventToPlugin(
     String pluginId,
     String topic,
     Map<String, dynamic> payload, {
     bool preferBackground = false,
+    bool allowPageLaunch = true,
     bool resumeForegroundIfNeeded = false,
     PluginInstanceId? instanceId,
     int? viewId,
@@ -1961,6 +1976,7 @@ class PluginRuntimeDispatcher {
       pluginId,
       topic,
       payload,
+      isCurrent: isCurrent,
     )) {
       debugPrint('PluginRuntimeDispatcher: $topic → queued (boot pending)');
       return;
@@ -1976,6 +1992,10 @@ class PluginRuntimeDispatcher {
         topic,
       )) {
         debugPrint('PluginRuntimeDispatcher: $topic → dropped (when)');
+        if (!allowPageLaunch) {
+          // ready עשוי להיות SynchronousFuture; הכשל ממתין להצמדת catchError.
+          return Future<void>.error(StateError('Plugin activation blocked'));
+        }
         return;
       }
       // אין מנוע חי — עם הרשאת ריצה ברקע התוסף מוּעָר בעצלנות והאירוע ממתין
@@ -1985,9 +2005,10 @@ class PluginRuntimeDispatcher {
         pluginId,
         topic,
         payload,
+        isCurrent: isCurrent,
       )) {
         debugPrint('PluginRuntimeDispatcher: $topic → queued (lazy boot)');
-      } else if (preferBackground) {
+      } else if (preferBackground && allowPageLaunch) {
         debugPrint('PluginRuntimeDispatcher: $topic → page launcher');
         PluginPageLauncher.instance.open(
           pluginId,
@@ -1998,6 +2019,9 @@ class PluginRuntimeDispatcher {
         );
       } else {
         debugPrint('PluginRuntimeDispatcher: $topic → dropped (no engine)');
+        if (!allowPageLaunch) {
+          return Future<void>.error(StateError('Plugin runtime unavailable'));
+        }
       }
       return;
     }

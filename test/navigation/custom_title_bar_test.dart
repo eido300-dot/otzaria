@@ -3,12 +3,17 @@ import 'package:otzaria/work_status/work_status_cubit.dart';
 import 'package:otzaria/navigation/view/tab_visuals.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/theme/theme_exports.dart';
+import 'package:otzaria/plugins/bloc/plugin_system_bloc.dart';
+import 'package:otzaria/plugins/bloc/plugin_system_state.dart';
 import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
+import 'package:otzaria/plugins/services/plugin_tab_info.dart';
+import 'package:otzaria/tabs/models/tool_tab.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:otzaria_icons/otzaria_icons.dart';
 import 'package:otzaria/core/windowing/app_window_caption.dart';
@@ -320,6 +325,102 @@ void main() {
     expect(find.byTooltip('ספר א, פרק א'), findsOneWidget);
   });
 
+  testWidgets('אותו ספר בכמה כרטיסיות מציג את המיקום בכותרת (issue #5146)', (
+    tester,
+  ) async {
+    final first = _makeTextTab('ספר א', currentTitle: 'פרק א');
+    final second = _makeTextTab('ספר א', currentTitle: 'פרק ג');
+    final other = _makeTextTab('ספר ב', currentTitle: 'פרק ב');
+    final tabsBloc = _TestTabsBloc(
+      TabsState(tabs: [first, second, other], currentTabIndex: 0),
+    );
+    final navigationBloc = _TestNavigationBloc(
+      const NavigationState(currentScreen: Screen.reading),
+    );
+    final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+
+    addTearDown(() async {
+      first.dispose();
+      second.dispose();
+      other.dispose();
+      await tabsBloc.close();
+      await navigationBloc.close();
+      await settingsBloc.close();
+    });
+
+    await _setSurfaceSize(tester, const Size(1600, 800));
+    await _pumpTitleBar(
+      tester,
+      tabsBloc: tabsBloc,
+      navigationBloc: navigationBloc,
+      settingsBloc: settingsBloc,
+    );
+
+    expect(find.textContaining('פרק א'), findsOneWidget);
+    expect(find.textContaining('פרק ג'), findsOneWidget);
+    expect(find.text('ספר ב'), findsOneWidget);
+    expect(find.textContaining('פרק ב'), findsNothing);
+  });
+
+  test('תאומות בכותרת דורשות כרטיסיות ספר נפרדות באותו שם', () {
+    final first = _makeTextTab('ספר א');
+    final second = _makeTextTab('ספר א')..isPinned = true;
+    final search = SearchingTab('ספר א', 'שאילתה');
+    final tool = ToolTab(toolId: 'builtin.test', title: 'ספר א');
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    addTearDown(search.dispose);
+    addTearDown(tool.dispose);
+
+    expect(tabsWithTwinTitle([first, first, search, tool]), isEmpty);
+    expect(
+      tabsWithTwinTitle([first, search, second, first, tool]),
+      unorderedEquals([first, second]),
+    );
+    second.title = 'ספר ב';
+    expect(tabsWithTwinTitle([second, first, search, tool]), isEmpty);
+  });
+
+  testWidgets('בכרטיסיות רבות וצרות המיקום של התאומות נשאר גלוי (issue #5146)', (
+    tester,
+  ) async {
+    final tabs = [
+      for (var i = 1; i <= 8; i++)
+        _makeTextTab('שולחן ערוך אורח חיים', currentTitle: 'סימן $i'),
+    ];
+    final tabsBloc = _TestTabsBloc(TabsState(tabs: tabs, currentTabIndex: 0));
+    final navigationBloc = _TestNavigationBloc(
+      const NavigationState(currentScreen: Screen.reading),
+    );
+    final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+
+    addTearDown(() async {
+      for (final tab in tabs) {
+        tab.dispose();
+      }
+      await tabsBloc.close();
+      await navigationBloc.close();
+      await settingsBloc.close();
+    });
+
+    await _setSurfaceSize(tester, const Size(1200, 800));
+    await _pumpTitleBar(
+      tester,
+      tabsBloc: tabsBloc,
+      navigationBloc: navigationBloc,
+      settingsBloc: settingsBloc,
+    );
+
+    // הכותרת המלאה אינה נכנסת, ולכן המיקום מרונדר בנפרד משם הספר הנחתך.
+    for (var i = 1; i <= 8; i++) {
+      final locationAlone =
+          find.text(', סימן $i').evaluate().length +
+          find.text('סימן $i').evaluate().length;
+      expect(locationAlone, 1, reason: 'המיקום של כרטיסיה $i נחתך');
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('כרטיסיה שכותרתה נכנסת במלואה אינה מקבלת tooltip', (
     tester,
   ) async {
@@ -349,6 +450,129 @@ void main() {
 
     expect(find.byTooltip('ספר א'), findsNothing);
   });
+
+  testWidgets('כרטיסיית תוסף מציגה את הכותרת והטולטיפ שהתוסף קבע', (
+    tester,
+  ) async {
+    final tab = ToolTab(
+      toolId: 'com.example.plugin',
+      title: 'שני טורים',
+      allowMultipleInstances: true,
+    );
+    final tabsBloc = _TestTabsBloc(TabsState(tabs: [tab], currentTabIndex: 0));
+    final navigationBloc = _TestNavigationBloc(
+      const NavigationState(currentScreen: Screen.reading),
+    );
+    final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+    final pluginSystemBloc = _TestPluginSystemBloc();
+
+    addTearDown(() async {
+      tab.dispose();
+      await tabsBloc.close();
+      await navigationBloc.close();
+      await settingsBloc.close();
+      await pluginSystemBloc.close();
+    });
+
+    await _setSurfaceSize(tester, const Size(1200, 800));
+    await _pumpTitleBar(
+      tester,
+      tabsBloc: tabsBloc,
+      navigationBloc: navigationBloc,
+      settingsBloc: settingsBloc,
+      pluginSystemBloc: pluginSystemBloc,
+    );
+    expect(find.text('שני טורים'), findsOneWidget);
+
+    tab.applyPluginTabInfo(
+      PluginTabInfoUpdate.parse({
+        'title': 'בראשית א',
+        'tooltip': 'בראשית, פרק א',
+      }),
+    );
+    tabsBloc.emitState(
+      TabsState(tabs: [tab], currentTabIndex: 0, updateCounter: 1),
+    );
+    await tester.idle();
+    await tester.pump();
+
+    expect(find.text('בראשית א'), findsOneWidget);
+    expect(find.text('שני טורים'), findsNothing);
+    expect(find.byTooltip('בראשית, פרק א'), findsOneWidget);
+  });
+
+  for (final narrow in [false, true]) {
+    for (final combined in [false, true]) {
+      testWidgets('טולטיפ תוסף מתעדכן${narrow ? ' בכרטיסיה צרה' : ''}'
+          '${combined ? ' בחלונית משולבת' : ''}', (tester) async {
+        final plugin = ToolTab(
+          toolId: 'com.example.plugin',
+          title: 'שני טורים',
+          allowMultipleInstances: true,
+        );
+        final OpenedTab tab = combined
+            ? CombinedTab(rightTab: _makeTextTab('ספר'), leftTab: plugin)
+            : plugin;
+        final tabs = <OpenedTab>[
+          _makeTextTab('פעילה'),
+          tab,
+          if (narrow)
+            for (var i = 0; i < 98; i++) _makeTextTab('ספר $i'),
+        ];
+        final tabsBloc = _TestTabsBloc(
+          TabsState(tabs: tabs, currentTabIndex: 0),
+        );
+        final navigationBloc = _TestNavigationBloc(
+          const NavigationState(currentScreen: Screen.reading),
+        );
+        final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+        final pluginSystemBloc = _TestPluginSystemBloc();
+        addTearDown(() async {
+          for (final tab in tabs) {
+            tab.dispose();
+          }
+          await tabsBloc.close();
+          await navigationBloc.close();
+          await settingsBloc.close();
+          await pluginSystemBloc.close();
+        });
+        await _setSurfaceSize(tester, const Size(1200, 800));
+        await _pumpTitleBar(
+          tester,
+          tabsBloc: tabsBloc,
+          navigationBloc: navigationBloc,
+          settingsBloc: settingsBloc,
+          pluginSystemBloc: pluginSystemBloc,
+        );
+        if (narrow) {
+          expect(find.byTooltip(tab.title), findsOneWidget);
+          expect(find.text(plugin.title), findsNothing);
+        }
+        plugin.applyPluginTabInfo(
+          PluginTabInfoUpdate.parse({
+            'title': 'בראשית א',
+            'tooltip': 'בראשית, פרק א',
+          }),
+        );
+        tabsBloc.emitState(
+          TabsState(tabs: tabs, currentTabIndex: 0, updateCounter: 1),
+        );
+        await tester.idle();
+        await tester.pump();
+        expect(
+          find.byTooltip(combined ? 'ספר\nבראשית, פרק א' : 'בראשית, פרק א'),
+          findsOneWidget,
+        );
+        expect(find.byTooltip(tab.title), findsNothing);
+        expect(find.text('שני טורים'), findsNothing);
+        if (narrow) {
+          expect(find.text('בראשית א'), findsNothing);
+        } else {
+          expect(find.text('בראשית א'), findsOneWidget);
+        }
+      });
+    }
+  }
 
   group('מיקום הכרטיסיות', () {
     /// שורת כותרת עם כרטיסיה אחת, במיקום הכרטיסיות הנתון.
@@ -782,7 +1006,41 @@ void main() {
       return cubit;
     }
 
-    for (final size in const [Size(360, 640), Size(844, 390)]) {
+    // טלפון לאורך: שורת כרום אחת, והפעולות של שורת הכותרת ב"עוד".
+    testWidgets('360×640: שורה אחת — הכרטיסיות ו"עוד", ובו כל הפעולות', (
+      tester,
+    ) async {
+      final cubit = await pumpPhone(tester, const Size(360, 640));
+      expect(
+        tester.getSize(find.byType(CustomTitleBar)).height,
+        AppDensity.of(
+          tester.element(find.byType(CustomTitleBar)),
+        ).captionHeight,
+        reason: 'שורה אחת ולא שתיים',
+      );
+      expect(find.text('ספר א'), findsOneWidget);
+      for (final moved in ['הגדרות תצוגת הספרים', 'מסך מלא']) {
+        expect(find.byTooltip(moved), findsNothing, reason: moved);
+      }
+      expect(find.byTooltip(RegExp('הצג היסטוריה')), findsNothing);
+
+      await tester.tap(find.byTooltip('עוד פעולות'));
+      await tester.pumpAndSettle();
+      for (final item in [
+        'היסטוריה',
+        'סימניות',
+        'החלף שולחן עבודה',
+        'הגדרות תצוגת הספרים',
+        'מסך מלא',
+      ]) {
+        expect(find.text(item), findsOneWidget, reason: item);
+      }
+      await tester.tap(find.text('מסך מלא'));
+      await tester.pumpAndSettle();
+      expect(cubit.state, isTrue);
+    });
+
+    for (final size in const [Size(844, 390)]) {
       testWidgets('${size.width.toInt()}×${size.height.toInt()}: הכפתור משמאל '
           'להגדרות, ונכנס למסך מלא', (tester) async {
         final cubit = await pumpPhone(tester, size);
@@ -3218,6 +3476,99 @@ void main() {
     expect((searchX - bookmarkX).abs(), lessThan((tabX - bookmarkX).abs()));
   });
 
+  for (final (screen, title) in [
+    (Screen.settings, 'הגדרות'),
+    (Screen.reading, 'עיון'),
+  ]) {
+    testWidgets('בהגדלת טקסט ×2 הכותרת "$title" נכנסת בגובה השורה', (
+      tester,
+    ) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final tabsBloc = _TestTabsBloc(TabsState(tabs: [], currentTabIndex: 0));
+      final navigationBloc = _TestNavigationBloc(
+        NavigationState(currentScreen: screen),
+      );
+      final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+      addTearDown(() async {
+        await tabsBloc.close();
+        await navigationBloc.close();
+        await settingsBloc.close();
+      });
+
+      await _setSurfaceSize(tester, const Size(1200, 800));
+      await _pumpTitleBar(
+        tester,
+        tabsBloc: tabsBloc,
+        navigationBloc: navigationBloc,
+        settingsBloc: settingsBloc,
+      );
+
+      // גודל ה-RenderParagraph מוגבל לגובה השורה גם כשהטקסט חורג ממנו.
+      final paragraph = tester.renderObject<RenderParagraph>(find.text(title));
+      expect(
+        paragraph.textSize.height,
+        lessThanOrEqualTo(paragraph.size.height),
+      );
+      final bar = tester.getRect(find.byType(CustomTitleBar));
+      final text = tester.getRect(find.text(title));
+      expect(text.top, greaterThanOrEqualTo(bar.top));
+      expect(
+        text.bottom,
+        lessThanOrEqualTo(bar.top + LayoutConstraints.windowCaptionHeight),
+      );
+    });
+  }
+
+  for (final compact in [false, true]) {
+    testWidgets('גובה השורה והכרטיסיה לפי הצפיפות (#4787): '
+        '${compact ? 'מצומצם' : 'רגיל'}', (tester) async {
+      final tab = _makeTextTab('ספר א');
+      final tabsBloc = _TestTabsBloc(
+        TabsState(tabs: [tab], currentTabIndex: 0),
+      );
+      final navigationBloc = _TestNavigationBloc(
+        const NavigationState(currentScreen: Screen.reading),
+      );
+      final settingsBloc = _TestSettingsBloc(SettingsState.initial());
+      addTearDown(() async {
+        tab.dispose();
+        await tabsBloc.close();
+        await navigationBloc.close();
+        await settingsBloc.close();
+      });
+
+      await _setSurfaceSize(tester, const Size(1200, 800));
+      await _pumpTitleBar(
+        tester,
+        tabsBloc: tabsBloc,
+        navigationBloc: navigationBloc,
+        settingsBloc: settingsBloc,
+        theme: AppThemeData.light(
+          AppThemeData.createColorScheme(
+            AppSeedColors.defaultLight,
+            Brightness.light,
+          ),
+          compactMenuMode: compact,
+        ),
+      );
+
+      final density = compact ? AppDensity.compact : AppDensity.regular;
+      expect(
+        tester.getSize(find.byType(CustomTitleBar)).height,
+        density.captionHeight,
+      );
+      expect(density.captionHeight, compact ? 32 : 40);
+      final tabBody = find.ancestor(
+        of: find.byType(Tab),
+        matching: find.byWidgetPredicate(
+          (w) => w is SizedBox && w.height == density.tabBodyHeight,
+        ),
+      );
+      expect(tabBody, findsOneWidget);
+    });
+  }
+
   testWidgets('כפתורי החלון המותאמים מוצגים גם במק', (tester) async {
     final tab = _makeTextTab('ספר א');
     final tabsBloc = _TestTabsBloc(
@@ -3462,6 +3813,7 @@ Future<void> _pumpTitleBar(
   ThemeData? theme,
   HistoryBloc? historyBloc,
   WorkspaceBloc? workspaceBloc,
+  PluginSystemBloc? pluginSystemBloc,
   WindowFullscreenCubit? fullscreenCubit,
   AppWindowRole? role,
   AppWindowController? controller,
@@ -3494,6 +3846,8 @@ Future<void> _pumpTitleBar(
             BlocProvider<HistoryBloc>.value(value: historyBloc),
           if (workspaceBloc != null)
             BlocProvider<WorkspaceBloc>.value(value: workspaceBloc),
+          if (pluginSystemBloc != null)
+            BlocProvider<PluginSystemBloc>.value(value: pluginSystemBloc),
         ],
         child: MaterialApp(
           builder: captionScope
@@ -3635,6 +3989,14 @@ class _TestSettingsBloc extends Bloc<SettingsEvent, SettingsState>
   }
 
   void emitState(SettingsState state) => emit(state);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _TestPluginSystemBloc extends Cubit<PluginSystemState>
+    implements PluginSystemBloc {
+  _TestPluginSystemBloc() : super(const PluginSystemLoaded([]));
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);

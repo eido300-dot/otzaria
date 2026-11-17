@@ -18,6 +18,9 @@ import 'package:otzaria/utils/file/file_picker_dialog_options.dart';
 import 'package:otzaria/widgets/dialogs/input_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:otzaria/core/windowing/app_window_keys.dart';
+import 'package:flutter_bloc/flutter_bloc.dart' show BlocProvider;
+import 'package:otzaria/core/windowing/window_fullscreen_cubit.dart';
+import 'package:otzaria/utils/ui/fullscreen_helper.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:otzaria_report_contract/otzaria_report_contract.dart';
 import 'package:path/path.dart' as p;
@@ -70,6 +73,7 @@ import 'package:otzaria/tabs/bloc/tabs_event.dart';
 import 'package:otzaria/tabs/models/combined_tab.dart';
 import 'package:otzaria/tabs/utils/confirm_close_tabs.dart';
 import 'package:otzaria/plugins/services/plugin_external_search_service.dart';
+import 'package:otzaria/plugins/services/plugin_find_ref_service.dart';
 import 'package:otzaria/plugins/services/plugin_in_book_search_service.dart';
 import 'package:otzaria/plugins/services/plugin_search_field_session_service.dart';
 import 'package:otzaria/plugins/models/plugin_library_book_provider.dart';
@@ -129,6 +133,7 @@ import 'package:otzaria/plugins/services/context_menu_registry.dart';
 import 'package:otzaria/plugins/services/plugin_toolbar_registry.dart';
 import 'package:otzaria/plugins/services/plugin_restore_state_store.dart';
 import 'package:otzaria/plugins/services/plugin_unsaved_changes_registry.dart';
+import 'package:otzaria/plugins/services/plugin_tab_info.dart';
 import 'package:otzaria/plugins/services/plugin_page_launcher.dart';
 import 'package:otzaria/plugins/services/plugin_new_tab_page_service.dart';
 import 'package:otzaria/plugins/view/plugin_new_tab_page_choice.dart';
@@ -236,7 +241,8 @@ Map<String, dynamic> buildThemePayloadFromScheme(
       Settings.getValue<String>(SettingsRepository.keyCommentatorsFontFamily) ??
       AppFonts.defaultCommentatorsFont;
   final fontSize =
-      Settings.getValue<double>(SettingsRepository.keyFontSize) ?? 25.0;
+      Settings.getValue<double>(SettingsRepository.keyFontSize) ??
+      AppFonts.defaultReadingSize;
   final commentatorsFontSize =
       Settings.getValue<double>(SettingsRepository.keyCommentatorsFontSize) ??
       22.0;
@@ -496,6 +502,10 @@ class PluginBridgeDependencies {
   final Future<bool> Function(String pluginId, String instanceId)?
   hasUserActivation;
 
+  /// מסך מלא של החלון (`ui.setFullscreen`). אופציונלי — ברירת המחדל היא
+  /// [FullscreenHelper] על החלון שבו רץ התוסף.
+  final Future<void> Function(bool fullscreen)? setAppFullscreen;
+
   /// ה-BLoC של התיקיות האישיות — היעד של `library.refreshUserBooks`. אותה
   /// סריקה שהלחצן „סרוק מחדש תיקיות אישיות” מפעיל, ולכן דרכה ולא בקוד סריקה
   /// משלנו. אופציונלי: כשאינו מסופק (בדיקות), הקריאה מחזירה
@@ -555,6 +565,7 @@ class PluginBridgeDependencies {
     this.printBookRange,
     this.capturePluginPagePdf,
     this.hasUserActivation,
+    this.setAppFullscreen,
     this.customFoldersBloc,
     this.waitForLibraryRefresh,
   });
@@ -708,13 +719,18 @@ class PluginBridgeAdapter {
   // שירות הורדת קבצים — מופע יחיד לכל adapter, נוצר עם השימוש הראשון
   // ומשוחרר ב-dispose (אחרת כל הורדה תדליף client ורישום ב-registry).
   PluginFileDownloadService? _fileDownloadService;
-  PluginFileDownloadService get _downloadService =>
-      _fileDownloadService ??= PluginFileDownloadService();
+  PluginFileDownloadService get _downloadService {
+    _checkFileAccess();
+    return _fileDownloadService ??= PluginFileDownloadService();
+  }
 
   // שירות פעולות קבצים (fs.extractZip/deleteFile) — מופע יחיד לכל adapter,
   // נוצר עם השימוש הראשון. אינו מחזיק משאבים ולכן אינו דורש שחרור ב-dispose.
   PluginFsService? _pluginFsService;
-  PluginFsService get _fsService => _pluginFsService ??= PluginFsService();
+  PluginFsService get _fsService {
+    _checkFileAccess();
+    return _pluginFsService ??= PluginFsService();
+  }
 
   // שירות שליחת דיווחי משתמש על התוסף (feedback.report) — מופע יחיד לכל
   // adapter, נוצר עם השימוש הראשון.
@@ -822,9 +838,17 @@ class PluginBridgeAdapter {
     return {'cancelled': true};
   }
 
-  /// משחרר את מה שקשור לדף הנוכחי — תרומות ו-streams — כשה-WebView שוחרר.
-  /// המתאם ממשיך לשמש את הדף הבא של אותו מופע.
+  int _fileAccessGeneration = 0;
+  bool _disposed = false;
+  final _fileAccessScopeKey = Object();
+
+  void _checkFileAccess() {
+    (Zone.current[_fileAccessScopeKey] as void Function()?)?.call();
+  }
+
+  /// משחרר תרומות ופעולות ממתינות של הדף; המתאם משמש גם את הדף הבא.
   void releaseRuntime({bool removeRegistrations = true}) {
+    _fileAccessGeneration++;
     // מסיר רק את תרומות המופע הזה — מופע אחר של אותו תוסף ממשיך לתפקד,
     // וה-dedup בציור חושף את העותקים שלו.
     final key = (pluginId: plugin.pluginId, instanceId: instanceId);
@@ -848,6 +872,8 @@ class PluginBridgeAdapter {
   }
 
   void dispose({bool removeRegistrations = true}) {
+    _disposed = true;
+    _grantedFolders.clear();
     _stopFolderRevocationListener();
     releaseRuntime(removeRegistrations: removeRegistrations);
     _networkFetchService?.dispose();
@@ -1039,11 +1065,36 @@ class PluginBridgeAdapter {
     String action,
     Map<String, dynamic> args, {
     PluginRpcEventSink? eventSink,
-  }) => withWindowDependencies(
-    () => _execute(domain, action, args, eventSink: eventSink),
-    domain: domain,
-    rpcAction: action,
-  );
+  }) {
+    final lifecycle = _fileAccessGeneration;
+    final authorization =
+        PluginRegistryRepository.fileAccessGenerationForPlugin(plugin.pluginId);
+    final remote = domain == 'network' && action == 'fetchFile'
+        ? _remoteFiles.generationForPlugin(plugin.pluginId)
+        : null;
+    // אותו guard מלווה את כל בדיקות הנתיב של הבקשה, גם כשיש כמה יעדים.
+    void check() {
+      if (_disposed ||
+          lifecycle != _fileAccessGeneration ||
+          authorization !=
+              PluginRegistryRepository.fileAccessGenerationForPlugin(
+                plugin.pluginId,
+              ) ||
+          (remote != null &&
+              remote != _remoteFiles.generationForPlugin(plugin.pluginId))) {
+        throw Exception('error.unavailable: file access revoked');
+      }
+    }
+
+    return runZoned(
+      () => withWindowDependencies(
+        () => _execute(domain, action, args, eventSink: eventSink),
+        domain: domain,
+        rpcAction: action,
+      ),
+      zoneValues: {_fileAccessScopeKey: check},
+    );
+  }
 
   Future<dynamic> _execute(
     String domain,
@@ -1196,19 +1247,25 @@ class PluginBridgeAdapter {
         if (uri == null) {
           throw Exception('error.invalid_params: invalid URL');
         }
-        // רק http/https — חוסם file://, javascript:, ומטפלי-פרוטוקול מותקנים
-        // (otzaria:// וכו') שהיו מאפשרים לתוסף להריץ פעולות מחוץ לדפדפן.
-        if (uri.scheme != 'http' && uri.scheme != 'https') {
-          throw Exception('error.forbidden: only http/https URLs are allowed');
+        // רק http/https וסכמות אפליקציה מאושרות — חוסם file://, javascript:,
+        // ושאר מטפלי-פרוטוקול שהיו מאפשרים לתוסף להריץ פעולות מחוץ לדפדפן.
+        final isAppScheme = _approvedAppSchemes.contains(uri.scheme);
+        if (uri.scheme != 'http' && uri.scheme != 'https' && !isAppScheme) {
+          throw Exception(
+            'error.forbidden: only http/https and approved app URLs are allowed',
+          );
         }
         // הכתובת עצמה נושאת מידע לאתר. בלי אישור — רק יעד שהתוסף רשאי
         // לפנות אליו ממילא ברשת, אחרת זה ערוץ שליחה שעוקף את רשימת ההיתר.
-        final allowed = await isPluginNetworkAccessAllowed(
-          uri: uri,
-          pluginId: plugin.pluginId,
-          manifest: plugin.manifest,
-          registry: _pluginRepo,
-        );
+        // פתיחת אפליקציה חיצונית דורשת אישור תמיד.
+        final allowed =
+            !isAppScheme &&
+            await isPluginNetworkAccessAllowed(
+              uri: uri,
+              pluginId: plugin.pluginId,
+              manifest: plugin.manifest,
+              registry: _pluginRepo,
+            );
         if (!allowed && !await _confirmOpenUrl(uri)) return false;
         final launched = await launchUrl(
           uri,
@@ -2490,7 +2547,7 @@ class PluginBridgeAdapter {
       }
       await _requireWritePermission();
     }
-    final canonical = canonicalizeNearestExisting(
+    final canonical = await canonicalizeNearestExistingAsync(
       resolveMovedFileBookPath(book.path),
     );
     if (canonical == null || !await File(canonical).exists()) {
@@ -3147,6 +3204,25 @@ class PluginBridgeAdapter {
           } on StateError {
             throw Exception(
               'error.conflict: provider is owned by another plugin',
+            );
+          }
+          return true;
+        }
+      case 'respondFindRef':
+        {
+          final requestId = args['requestId'];
+          if (requestId is! String || requestId.isEmpty) {
+            throw Exception('error.invalid_params: requestId required');
+          }
+          final accepted = PluginFindRefService.instance.respond(
+            plugin.pluginId,
+            requestId,
+            results: args['results'] as List? ?? const [],
+            error: args['error'] as String?,
+          );
+          if (!accepted) {
+            throw Exception(
+              'error.not_found: reference request is not owned by plugin',
             );
           }
           return true;
@@ -4823,6 +4899,45 @@ class PluginBridgeAdapter {
           message: args['message'] as String?,
         );
         return true;
+      case 'setTabInfo':
+        // spec: setTabInfo({ title?, tooltip? }) — כותרת וטולטיפ של הכרטיסיה
+        // של המופע הקורא בלבד. שדה חסר לא משתנה; null או ריק מאפס.
+        final update = PluginTabInfoUpdate.parse(args);
+        final tabsBloc = _windowDependencies.tabsBloc;
+        final tab = tabsBloc.state.tabs
+            .expand(leafPanes)
+            .whereType<ToolTab>()
+            .where(
+              (tab) =>
+                  tab.toolId == plugin.pluginId && tab.instanceId == instanceId,
+            )
+            .firstOrNull;
+        // מופע רקע, קורא טקסט, או כרטיסיה שנסגרה — אין מה לעדכן.
+        if (tab == null) return false;
+        tabsBloc.add(SetPluginTabInfo(tab, update));
+        return true;
+      case 'setFullscreen':
+        // spec: setFullscreen({ fullscreen }) — מסך מלא של האפליקציה, כמו
+        // F11. כניסה רק מפעולת משתמש; יציאה תמיד. Escape ו"חזור" יוצאים
+        // ממסך מלא בכל מקרה, והתוסף אינו יכול לחסום אותם.
+        final fullscreen = args['fullscreen'];
+        if (fullscreen is! bool) {
+          throw Exception('error.invalid_params: fullscreen must be boolean');
+        }
+        if (fullscreen) {
+          final check =
+              _dependencies.hasUserActivation ?? _defaultHasUserActivation;
+          if (!await check(plugin.pluginId, instanceId)) {
+            throw Exception(
+              'error.forbidden: Requires a user gesture — call it directly '
+              'from a click handler',
+            );
+          }
+        }
+        final setter =
+            _dependencies.setAppFullscreen ?? _defaultSetAppFullscreen;
+        await setter(fullscreen);
+        return true;
       case 'pickFolder':
         // פותח דיאלוג בחירת תיקייה. הנתיב שנבחר נרשם כתיקייה מאושרת לתוסף —
         // מכאן ואילך מותר לו לכתוב/למחוק בתוכה (download.destPath, fs.*).
@@ -4836,10 +4951,11 @@ class PluginBridgeAdapter {
         if (rejection != null) {
           throw Exception('error.forbidden: $rejection');
         }
-        final canonical = canonicalizeNearestExisting(path);
+        final canonical = await canonicalizeNearestExistingAsync(path);
         if (canonical == null) {
           throw Exception('error.forbidden: selected folder no longer exists');
         }
+        _checkFileAccess();
         _grantedFolders.add(canonical);
         return {'path': path};
       case 'print':
@@ -5064,6 +5180,9 @@ class PluginBridgeAdapter {
     }
   }
 
+  /// סכמות של אפליקציות מותקנות שתוסף רשאי לבקש לפתוח (באישור בכל פעם).
+  static const _approvedAppSchemes = {'zayit'};
+
   /// דיאלוג אישור לפתיחת [uri] בדפדפן. אחד בכל רגע, כמו דיאלוגי המערכת.
   Future<bool> _confirmOpenUrl(Uri uri) async {
     if (_userDialogOpen) {
@@ -5075,9 +5194,11 @@ class PluginBridgeAdapter {
       final shown = url.length > 300 ? '${url.substring(0, 300)}…' : url;
       return await _dependencies.showConfirmDialog(
         title: 'פתיחת קישור חיצוני',
-        content:
-            'התוסף "${plugin.name}" מבקש לפתוח בדפדפן כתובת באתר '
-            '${uri.host}:\n$shown\n\nהכתובת יכולה להעביר לאתר מידע מתוך התוסף.',
+        content: _approvedAppSchemes.contains(uri.scheme)
+            ? 'התוסף "${plugin.name}" מבקש לפתוח את האפליקציה '
+                  '"${uri.scheme}":\n$shown'
+            : 'התוסף "${plugin.name}" מבקש לפתוח בדפדפן כתובת באתר '
+                  '${uri.host}:\n$shown\n\nהכתובת יכולה להעביר לאתר מידע מתוך התוסף.',
       );
     } finally {
       _userDialogOpen = false;
@@ -5113,6 +5234,24 @@ class PluginBridgeAdapter {
         );
     // WKWebView אינו מממש את navigator.userActivation; שם אין מה לאכוף.
     return result != 'inactive';
+  }
+
+  /// מסך מלא של החלון שבו רץ התוסף. כניסה רק כשהעיון מתיר מסך מלא (מסך
+  /// עיון עם כרטיסיה פתוחה), כמו F11.
+  Future<void> _defaultSetAppFullscreen(bool fullscreen) async {
+    final context = _windowDependencies.context;
+    if (context == null || !context.mounted) {
+      throw Exception('error.unavailable: No window for fullscreen');
+    }
+    if (fullscreen && !FullscreenHelper.isAllowedInContext(context)) {
+      throw Exception(
+        'error.forbidden: Fullscreen is available only in the reading screen',
+      );
+    }
+    if (BlocProvider.of<WindowFullscreenCubit>(context).state == fullscreen) {
+      return;
+    }
+    await FullscreenHelper.toggleFullscreen(context, fullscreen);
   }
 
   /// מסך ההדפסה של הקורא מעל חלון הבקשה (`reader.printRange`).
@@ -5333,18 +5472,29 @@ class PluginBridgeAdapter {
     String targetPath, {
     bool allowRoot = true,
   }) async {
-    final canonicalTarget = canonicalizeNearestExisting(targetPath);
+    final canonicalTarget = await canonicalizeNearestExistingAsync(targetPath);
+    _checkFileAccess();
     if (canonicalTarget == null) return false;
-    bool inside(String root) {
-      final canonicalRoot = canonicalizeNearestExisting(root);
+    Future<bool> inside(String root) async {
+      final canonicalRoot = await canonicalizeNearestExistingAsync(root);
       if (canonicalRoot == null || !p.equals(canonicalRoot, root)) return false;
       return (allowRoot && p.equals(canonicalTarget, canonicalRoot)) ||
           p.isWithin(canonicalRoot, canonicalTarget);
     }
 
-    if (_grantedFolders.any(inside)) return true;
+    // עותק: pickFolder יכול להוסיף תיקייה בזמן ההמתנה לדיסק.
+    for (final root in _grantedFolders.toList()) {
+      final matches = await inside(root);
+      _checkFileAccess();
+      if (matches) return true;
+    }
     final grants = await _folderGrants.list(plugin.pluginId);
-    return grants.any((grant) => inside(grant.path));
+    for (final grant in grants) {
+      final matches = await inside(grant.path);
+      _checkFileAccess();
+      if (matches) return true;
+    }
+    return false;
   }
 
   Future<void> _requireInGrantedFolder(
@@ -5466,6 +5616,8 @@ class PluginBridgeAdapter {
         // קובץ שהורד ל-`network.fetchFile` נמחק עם ביטול ה-token שלו.
         final revoked = await _loadUserFileGrant(token);
         await _removeUserFileGrant(token);
+        PluginRegistryRepository.revokePendingFileAccess(plugin.pluginId);
+        _fileServer.revoke(token);
         if (revoked != null &&
             _remoteFiles.ownsCanonical(
               revoked.path,
@@ -5635,12 +5787,11 @@ class PluginBridgeAdapter {
     if (path == null || path.isEmpty) {
       return {'cancelled': true};
     }
-    final canonical = canonicalizeNearestExisting(path);
-    if (canonical == null || !File(canonical).existsSync()) {
+    final canonical = await canonicalizeNearestExistingAsync(path);
+    if (canonical == null || !await File(canonical).exists()) {
       throw Exception('error.not_found: selected file does not exist');
     }
-    final registration = await _fileServer.register(
-      pluginId: plugin.pluginId,
+    final registration = await _registerUserFile(
       canonicalPath: canonical,
     );
     await _saveUserFileGrant(registration.token, canonical, writable: writable);
@@ -5751,8 +5902,8 @@ class PluginBridgeAdapter {
           // לעבור דרך „שמור בשם”, ומשם מתקבל token שכן ניתן לכתיבה.
           throw Exception('error.permission_denied: file token is read-only');
         }
-        final canonical = canonicalizeNearestExisting(grant.path);
-        if (canonical == null || !File(canonical).existsSync()) {
+        final canonical = await canonicalizeNearestExistingAsync(grant.path);
+        if (canonical == null || !await File(canonical).exists()) {
           await _removeUserFileGrant(targetToken);
           throw Exception('error.not_found: file no longer exists');
         }
@@ -5790,13 +5941,12 @@ class PluginBridgeAdapter {
         return {'cancelled': true};
       }
 
-      final canonical = canonicalizeNearestExisting(chosen);
+      final canonical = await canonicalizeNearestExistingAsync(chosen);
       if (canonical == null) {
         throw Exception('error.invalid_params: could not resolve target path');
       }
       await _atomicWrite(upload, canonical);
-      final registration = await _fileServer.register(
-        pluginId: plugin.pluginId,
+      final registration = await _registerUserFile(
         canonicalPath: canonical,
       );
       await _saveUserFileGrant(registration.token, canonical, writable: true);
@@ -5870,7 +6020,9 @@ class PluginBridgeAdapter {
     final target = pluginSaveTargetPath(folder: folder, fileName: fileName);
     if (target == null) return null;
 
-    if (File(target).existsSync()) {
+    final exists = await File(target).exists();
+    _checkFileAccess();
+    if (exists) {
       final replace = await _dependencies.showWarningDialog(
         title: 'הקובץ כבר קיים',
         content: 'הקובץ „$fileName” כבר קיים בתיקייה שנבחרה.',
@@ -5897,6 +6049,7 @@ class PluginBridgeAdapter {
   /// התיעוד של `File.rename` אינו מבטיח אותה, ובפועל היא מתקיימת ב-POSIX
   /// באותו volume וב-Windows דרך החלפה. לכן אין להצהיר „אטומי” בלי הסתייגות.
   Future<void> _atomicWrite(File source, String targetPath) async {
+    _checkFileAccess();
     rejectPluginExecutable(targetPath);
     final target = File(targetPath);
     final suffix = _randomSuffix();
@@ -5912,6 +6065,7 @@ class PluginBridgeAdapter {
     await _sweepStagingLeftovers(target.parent);
 
     try {
+      _checkFileAccess();
       await source.copy(staging.path);
 
       // flush לפני ה-rename: File.copy אינו מבטיח שהבייטים ירדו לדיסק, ובלי
@@ -5924,6 +6078,7 @@ class PluginBridgeAdapter {
         await handle.close();
       }
 
+      _checkFileAccess();
       await staging.rename(targetPath);
     } catch (_) {
       try {
@@ -5968,6 +6123,35 @@ class PluginBridgeAdapter {
     }
   }
 
+  Future<PluginFileRegistration> _registerUserFile({
+    required String canonicalPath,
+    String? token,
+  }) async {
+    _checkFileAccess();
+    final registration = token == null
+        ? await _fileServer.register(
+            pluginId: plugin.pluginId,
+            canonicalPath: canonicalPath,
+            checkAccess: _checkFileAccess,
+          )
+        : (
+            token: token,
+            url: await _fileServer.registerWithToken(
+              pluginId: plugin.pluginId,
+              canonicalPath: canonicalPath,
+              checkAccess: _checkFileAccess,
+              token: token,
+            ),
+          );
+    try {
+      _checkFileAccess();
+    } catch (_) {
+      if (token == null) _fileServer.revoke(registration.token);
+      rethrow;
+    }
+    return registration;
+  }
+
   /// `fs.resolveFileUrl` — בונה מחדש URL טרי לקובץ שכבר אושר (לפי token שהתוסף
   /// שמר). נצרך אחרי reload, כשהפורט של השרת השתנה ורישום הזיכרון אבד.
   Future<Map<String, dynamic>> _resolveUserFileUrl(
@@ -5976,14 +6160,13 @@ class PluginBridgeAdapter {
     final token = args['token'] as String?;
     if (token == null) throw Exception('error.invalid_params: token required');
     final canonical = await _resolveGrantedFilePath(token);
-    final url = await _fileServer.registerWithToken(
-      pluginId: plugin.pluginId,
+    final url = await _registerUserFile(
       canonicalPath: canonical,
       token: token,
     );
     return {
       'token': token,
-      'url': url,
+      'url': url.url,
       'name': p.basename(canonical),
       'size': await File(canonical).length(),
     };
@@ -6002,6 +6185,7 @@ class PluginBridgeAdapter {
     }
     // קובץ שהמשתמש בחר יכול להיות בכל קידוד; `readAsString` היה זורק על
     // קובץ ANSI עברית והתוסף היה מקבל שגיאה במקום את התוכן.
+    _checkFileAccess();
     return readTextFileSmart(file);
   }
 
@@ -6012,11 +6196,12 @@ class PluginBridgeAdapter {
     if (stored == null) {
       throw Exception('error.not_found: unknown file token');
     }
-    final canonical = canonicalizeNearestExisting(stored.path);
-    if (canonical == null || !File(canonical).existsSync()) {
+    final canonical = await canonicalizeNearestExistingAsync(stored.path);
+    if (canonical == null || !await File(canonical).exists()) {
       await _removeUserFileGrant(token);
       throw Exception('error.not_found: file no longer exists');
     }
+    _checkFileAccess();
     return canonical;
   }
 
@@ -6065,6 +6250,13 @@ class PluginBridgeAdapter {
     required bool writable,
   }) => _serializeGrantWrites(() async {
     final grants = await _readUserFileGrants();
+    final previous = grants[token];
+    try {
+      _checkFileAccess();
+    } catch (_) {
+      if (previous == null) _fileServer.revoke(token);
+      rethrow;
+    }
     grants[token] = {'path': path, 'access': writable ? 'readwrite' : 'read'};
     await _pluginRepo.setKV(
       plugin.pluginId,
@@ -6072,6 +6264,23 @@ class PluginBridgeAdapter {
       _userFileGrantsKey,
       jsonEncode(grants),
     );
+    try {
+      _checkFileAccess();
+    } catch (_) {
+      if (previous == null) _fileServer.revoke(token);
+      if (previous == null) {
+        grants.remove(token);
+      } else {
+        grants[token] = previous;
+      }
+      await _pluginRepo.setKV(
+        plugin.pluginId,
+        '_internal',
+        _userFileGrantsKey,
+        jsonEncode(grants),
+      );
+      rethrow;
+    }
   });
 
   /// קורא grant, כולל הפורמט הישן.
@@ -6128,15 +6337,17 @@ class PluginBridgeAdapter {
       if (writable && !existingWritable) {
         await _saveUserFileGrant(token, canonical, writable: true);
       }
-      final url = await _fileServer.registerWithToken(
-        pluginId: plugin.pluginId,
+      final url = await _registerUserFile(
         canonicalPath: canonical,
         token: token,
       );
-      return (token: token, url: url, writable: writable || existingWritable);
+      return (
+        token: token,
+        url: url.url,
+        writable: writable || existingWritable,
+      );
     }
-    final registration = await _fileServer.register(
-      pluginId: plugin.pluginId,
+    final registration = await _registerUserFile(
       canonicalPath: canonical,
     );
     await _saveUserFileGrant(registration.token, canonical, writable: writable);
@@ -6173,10 +6384,11 @@ class PluginBridgeAdapter {
     if (picked == null || picked.isEmpty) return {'cancelled': true};
     final rejection = await pluginFolderRejectionReason(picked);
     if (rejection != null) throw Exception('error.forbidden: $rejection');
-    final canonical = canonicalizeNearestExisting(picked);
+    final canonical = await canonicalizeNearestExistingAsync(picked);
     if (canonical == null || !await Directory(canonical).exists()) {
       throw Exception('error.not_found: selected folder does not exist');
     }
+    _checkFileAccess();
     final name = p.basename(canonical);
     var folderToken = (await _folderGrants.byPath(
       plugin.pluginId,
@@ -6191,12 +6403,14 @@ class PluginBridgeAdapter {
         subtitle: 'אפשר לבטל את הגישה בכל עת בהגדרות התוסף.',
       );
       if (!consented) return {'cancelled': true};
+      _checkFileAccess();
       folderToken = 'dir-${_randomSuffix()}${_randomSuffix()}';
       await _folderGrants.add(plugin.pluginId, (
         token: folderToken,
         path: canonical,
       ));
     }
+    _checkFileAccess();
     return {
       'cancelled': false,
       'folderToken': folderToken,
@@ -6375,6 +6589,30 @@ class PluginBridgeAdapter {
           'error.unknown_method: Unknown action in shortcut: $action',
         );
     }
+  }
+
+  /// אורך מרבי של כותרת כרטיסיה שהתוסף מבקש ב-`plugin.openSelf`.
+  static const int _maxOpenSelfTitleLength = 60;
+
+  /// כותרת הכרטיסיה של `plugin.openSelf` עם `newTab`: מחרוזת בלי תווי בקרה,
+  /// מקוצצת ל-[_maxOpenSelfTitleLength]. כותרת ריקה כמוה כחסרה. בלי `newTab`
+  /// אין מופע חדש לתת לו שם, ולכן זו שגיאה במקום התעלמות שקטה.
+  String? _parseOpenSelfTitle(Object? raw, bool newTab) {
+    if (raw == null) return null;
+    if (raw is! String) {
+      throw Exception('error.invalid_params: title must be a string');
+    }
+    if (!newTab) {
+      throw Exception('error.invalid_params: title requires newTab: true');
+    }
+    final cleaned = raw
+        .replaceAll(RegExp(r'[\u0000-\u001F\u007F-\u009F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (cleaned.isEmpty) return null;
+    final graphemes = cleaned.characters;
+    if (graphemes.length <= _maxOpenSelfTitleLength) return cleaned;
+    return graphemes.take(_maxOpenSelfTitleLength).toString().trimRight();
   }
 
   /// גם ילד בתפריט יכול לפתוח מופע, ולכן בודקים את כל עץ הפריטים.
@@ -8101,6 +8339,7 @@ class PluginBridgeAdapter {
         if (newTab != null && newTab is! bool) {
           throw Exception('error.invalid_params: newTab must be boolean');
         }
+        final tabTitle = _parseOpenSelfTitle(args['title'], newTab == true);
         if (newTab == true) {
           // מופע נוסף הוא WebView נוסף מעל אותו אחסון — רק תוסף שהצהיר
           // במניפסט שהוא יודע לחיות לצד עצמו.
@@ -8123,6 +8362,7 @@ class PluginBridgeAdapter {
                   payload: {'param': args['param']},
                   viewId: _windowDependencies.viewId,
                   windowKeys: _windowDependencies.windowKeys,
+                  title: tabTitle,
                 );
             return openedInstanceId != null;
           }
@@ -8394,26 +8634,32 @@ class PluginBridgeAdapter {
       await _remoteFiles.delete(file.path);
       throw Exception('error.unavailable: remote file download revoked');
     }
-    final canonical = canonicalizeNearestExisting(file.path) ?? file.path;
-    final registration = await _fileServer.register(
-      pluginId: plugin.pluginId,
-      canonicalPath: canonical,
-    );
-    await _dropEvictedRemoteGrants();
-    await _saveUserFileGrant(registration.token, canonical, writable: false);
-    if (generation != _remoteFiles.generationForPlugin(plugin.pluginId)) {
-      _fileServer.revoke(registration.token);
-      await _removeUserFileGrant(registration.token);
-      await _remoteFiles.delete(canonical);
-      throw Exception('error.unavailable: remote file download revoked');
+    var completed = false;
+    try {
+      final canonical =
+          await canonicalizeNearestExistingAsync(file.path) ?? file.path;
+      final registration = await _registerUserFile(
+        canonicalPath: canonical,
+      );
+      await _dropEvictedRemoteGrants();
+      await _saveUserFileGrant(registration.token, canonical, writable: false);
+      if (generation != _remoteFiles.generationForPlugin(plugin.pluginId)) {
+        _fileServer.revoke(registration.token);
+        await _removeUserFileGrant(registration.token);
+        await _remoteFiles.delete(canonical);
+        throw Exception('error.unavailable: remote file download revoked');
+      }
+      completed = true;
+      return {
+        'token': registration.token,
+        'url': registration.url,
+        'name': file.name,
+        'size': file.size,
+        'mime': PluginFileServer.contentTypeForPath(canonical).mimeType,
+      };
+    } finally {
+      if (!completed) await _remoteFiles.delete(file.path);
     }
-    return {
-      'token': registration.token,
-      'url': registration.url,
-      'name': file.name,
-      'size': file.size,
-      'mime': PluginFileServer.contentTypeForPath(canonical).mimeType,
-    };
   }
 
   /// בדיקת היעד בכל קפיצה של הורדה, כולל redirect: אותה הכרעה כמו ל-URL

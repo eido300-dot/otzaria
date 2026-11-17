@@ -39,6 +39,27 @@ Link makeLink({
 }
 
 void main() {
+  test('retains hot line lookups while evicting cold line lookups', () {
+    final range = makeLink(index1: 1, index1End: 3000);
+    final point = makeLink(index1: 2, path2: 'point.txt');
+    final map = buildLinksByLineMap([range, point]);
+    final first = map[2]!;
+    final cold = map[3]!;
+    expect(map[2], same(first));
+    expect(first, [range, point]);
+    for (var line = 4; line <= 3000; line++) {
+      expect(map[line], [range]);
+      expect(map[line + 4000], isNull);
+      expect(map[2], same(first));
+    }
+    expect(map[3], [range]);
+    expect(map[3], isNot(same(cold)));
+    expect(map[2], same(first));
+    expect(first, [range, point]);
+    expect(() => first.clear(), throwsUnsupportedError);
+    expect(map[0], isNull);
+  });
+
   group('mergeLinksByIdentity', () {
     test('שומר טווחים, עוגנים ויעדים שונים באותו זוג שורות', () {
       final links = [
@@ -399,16 +420,12 @@ void main() {
             last: 4201,
             keepLines: {751, 1251, 5501},
           );
+          final keptIndex = CommentarySyncIndex(kept);
+          final fullIndex = CommentarySyncIndex(links);
           for (final line in [750, 1250, 3800, 4000, 4200, 5500]) {
             expect(
-              CommentarySyncHelper.getCommentaryTargetIndex(
-                linksForCommentary: kept,
-                logicalMainIndex: line,
-              ),
-              CommentarySyncHelper.getCommentaryTargetIndex(
-                linksForCommentary: links,
-                logicalMainIndex: line,
-              ),
+              keptIndex.targetIndexFor(line),
+              fullIndex.targetIndexFor(line),
               reason: 'שורה $line, סוג $type, מסד ${source.wireKey}',
             );
           }
@@ -507,28 +524,23 @@ void main() {
         kept,
         unorderedEquals([sameLineBefore, nearestAfter, otherType]),
       );
+      final keptIndex = CommentarySyncIndex(kept);
+      final fullIndex = CommentarySyncIndex(all);
       for (final line in [999, 1100, 1199]) {
         expect(
-          CommentarySyncHelper.getCommentaryTargetIndex(
-            linksForCommentary: kept,
-            logicalMainIndex: line,
-          ),
-          CommentarySyncHelper.getCommentaryTargetIndex(
-            linksForCommentary: all,
-            logicalMainIndex: line,
-          ),
+          keptIndex.targetIndexFor(line),
+          fullIndex.targetIndexFor(line),
         );
       }
       final afterOnly = [nearestAfter, farAfter];
       expect(
-        CommentarySyncHelper.getCommentaryTargetIndex(
-          linksForCommentary: retainLinksNearLines(
+        CommentarySyncIndex(
+          retainLinksNearLines(
             afterOnly,
             first: 1000,
             last: 1200,
           ),
-          logicalMainIndex: 1100,
-        ),
+        ).targetIndexFor(1100),
         39,
       );
     });

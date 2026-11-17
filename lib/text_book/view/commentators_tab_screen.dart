@@ -295,6 +295,10 @@ CommentatorsVerseStep? computeVerseStep(
 /// רוחב חלונית הניווט בכרטיסיית המפרשים.
 const double _kNavPaneWidth = 320;
 
+/// המקום המינימלי לתוכן כדי שחלונית הניווט תידחק ליד התוכן. מתחת לזה היא
+/// נפתחת כ-overlay, ואין טעם בכפתור נעיצה.
+const double _kNavMinMainContentWidth = 400;
+
 class CommentatorsTabScreen extends StatefulWidget {
   final CommentatorsTab tab;
   final Function(OpenedTab) openBookCallback;
@@ -454,7 +458,11 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
   void initState() {
     super.initState();
     _focus = FocusRepository.of(context);
-    _navTabController = TabController(length: 3, vsync: this);
+    _navTabController = TabController(
+      length: 3,
+      vsync: this,
+      animationDuration: AppMotion.tabSwitch,
+    );
     _navTabController.addListener(() {
       _searchHost.activeTab = _navTabController.index;
       if (_navTabController.indexIsChanging) return;
@@ -780,7 +788,7 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
                               },
                               alignment: AlignmentDirectional.centerEnd,
                               paneWidth: _kNavPaneWidth,
-                              minMainContentWidth: 400,
+                              minMainContentWidth: _kNavMinMainContentWidth,
                               mainContent: _buildCommentaryMainContent(
                                 context,
                                 state,
@@ -1039,6 +1047,11 @@ class _CommentatorsTabScreenState extends State<CommentatorsTabScreen>
       nextMajorTooltip: 'הפרק הבא',
       navPaneOpen: _navPaneOpen,
       navPanePinned: _pinLeftPane,
+      canPinNavPane: NavSidePanel.canPin(
+        context,
+        paneWidth: _kNavPaneWidth,
+        minMainContentWidth: _kNavMinMainContentWidth,
+      ),
       onToggleNavPane: _toggleNavPane,
       onTogglePin: () {
         setState(() => _pinLeftPane = !_pinLeftPane);
