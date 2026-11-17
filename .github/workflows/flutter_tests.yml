@@ -170,6 +170,7 @@ jobs:
       # דוח ui_lint מול tool/ui_lint/baseline.json (docs/design-system/CI_ENFORCEMENT.md).
       # ה-step הזה רק מדווח: חריגות חדשות מסומנות ב-annotations ולא מכשילות את ה-job.
       # השער החוסם הוא test/design_system/ui_lint_test.dart, שרץ ב-shards של job ה-test.
+      # ה-summary כולל גם את טבלת המצב לפי מודול (אותה טבלה כמו --format=modules).
       - name: UI lint report
         continue-on-error: true
         run: dart tool/ui_lint_cli.dart --format=github
@@ -494,7 +495,7 @@ jobs:
         timeout-minutes: 10
         working-directory: packages/super_native_extensions/rust
         run: |
-          rustfmt --edition 2021 --check src/win32/reader.rs src/win32/image_conversion.rs src/win32/bitmap_reader_tests.rs
+          rustfmt --edition 2021 --check src/win32/drag.rs src/win32/reader.rs src/win32/image_conversion.rs src/win32/bitmap_reader_tests.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked bitmap_reader_tests -- --test-threads=1 --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

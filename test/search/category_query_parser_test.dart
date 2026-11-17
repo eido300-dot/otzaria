@@ -21,14 +21,21 @@ Category _category(
 );
 
 class _CountingBook extends TextBook {
-  _CountingBook() : super(title: 'ספר אחר', id: 1);
+  _CountingBook({super.title = 'ספר אחר', super.id = 1});
 
   int titleReads = 0;
+  int idReads = 0;
 
   @override
   String get title {
     titleReads++;
     return super.title;
+  }
+
+  @override
+  int? get id {
+    idReads++;
+    return super.id;
   }
 }
 
@@ -50,6 +57,25 @@ class _CountingCategory extends Category {
   String get path {
     pathReads++;
     return super.path;
+  }
+}
+
+class _CountingLibrary extends Library {
+  _CountingLibrary({required super.categories});
+
+  int bookScans = 0;
+  int categoryScans = 0;
+
+  @override
+  List<Book> getAllBooks() {
+    bookScans++;
+    return super.getAllBooks();
+  }
+
+  @override
+  List<Category> getAllCategories() {
+    categoryScans++;
+    return super.getAllCategories();
   }
 }
 
@@ -84,6 +110,49 @@ void main() {
       final parsed = parseCategoryQuery('מילה@בראשיתת', library);
       expect(parsed.categoryFound, isTrue);
       expect(parsed.facets, contains(contains('בראשית')));
+    });
+
+    test('כמה שמות וניסיון נתיב הפוך חולקים סריקה ונרמול', () {
+      final book = _CountingBook();
+      final library = _CountingLibrary(
+        categories: [
+          _category('תורה', [book]),
+        ],
+      );
+
+      final parsed = parseCategoryQuery(
+        'מילה@לאקייםבכללאא@לאקייםבכללבב/לאקייםבכללגג',
+        library,
+      );
+
+      expect(parsed.facets, isEmpty);
+      expect(parsed.notFoundNames, hasLength(2));
+      expect(library.bookScans, 1);
+      expect(library.categoryScans, 1);
+      expect(book.titleReads, 1);
+    });
+
+    test('שאילתה בלי שמות אינה סורקת את הקטלוג', () {
+      final library = _CountingLibrary(categories: []);
+      parseCategoryQuery('מילה', library);
+      parseCategoryQuery('מילה@@', library);
+      expect(library.bookScans, 0);
+      expect(library.categoryScans, 0);
+    });
+
+    test('נתוני פענוח אינם נשמרים לשאילתה הבאה לאחר שינוי ספרייה', () {
+      final category = _category('ספרים', []);
+      final library = _CountingLibrary(categories: [category]);
+      expect(parseCategoryQuery('מילה@בראשית', library).facets, isEmpty);
+
+      final book = TextBook(title: 'בראשית', id: 42);
+      category.books.add(book);
+      expect(parseCategoryQuery('מילה@בראשית@בראשית', library).facets, [
+        facetOf(book),
+        facetOf(book),
+      ]);
+      expect(library.bookScans, 2);
+      expect(library.categoryScans, 2);
     });
 
     test('ללא @ — מחזיר את השאילתה כמות שהיא ו-facets null', () {
@@ -188,6 +257,26 @@ void main() {
       expect(parsed.categoryFound, isTrue);
       expect(parsed.facets!.length, 1);
       expect(parsed.facets!.single, isNot(contains('רשי')));
+    });
+
+    test('כותרת מדויקת מדלגת על בדיקת כינויים לכל שאר הספרים', () {
+      final otherBooks = List.generate(
+        1000,
+        (i) => _CountingBook(title: 'פירוש בראשית סעיף $i', id: i + 1),
+      );
+      final exactBook = TextBook(title: 'בראשית', id: 1001);
+      final matchingCategory = _category('בראשית', []);
+      final library = Library(
+        categories: [
+          _category('תורה', [...otherBooks, exactBook]),
+          matchingCategory,
+        ],
+      );
+
+      final parsed = parseCategoryQuery('מילה@בְּרֵאשִׁית', library);
+
+      expect(parsed.facets, [facetOf(exactBook), matchingCategory.path]);
+      expect(otherBooks.map((book) => book.idReads), everyElement(0));
     });
 
     test('שם חלקי — התאמת הכלה בכותרת', () {

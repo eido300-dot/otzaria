@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:otzaria/plugins/models/plugin_text_normalization.dart';
 import 'package:otzaria/plugins/services/plugin_text_occurrence_service.dart';
+import 'package:otzaria/plugins/services/reader_selection_service.dart';
 
 void main() {
   const service = PluginTextOccurrenceService();
@@ -82,6 +83,106 @@ void main() {
     expect(second.results.single.range.start.grapheme, 6);
     expect(second.hasMore, isFalse);
     expect(second.nextCursor, isNull);
+  });
+
+  test('dense normalized pages preserve individual anchors and pagination', () {
+    final text = List.filled(205, 'אָב ').join();
+    final first = service.find(
+      bookId: 'book',
+      sectionIndex: 2,
+      layer: 'source',
+      text: text,
+      textHash: 'hash',
+      query: 'אב',
+      normalize: options(PluginNormalizationProfile.search),
+      limit: 200,
+    );
+    final second = service.find(
+      bookId: 'book',
+      sectionIndex: 2,
+      layer: 'source',
+      text: text,
+      textHash: 'hash',
+      query: 'אב',
+      normalize: options(PluginNormalizationProfile.search),
+      limit: 200,
+      cursor: first.nextCursor,
+    );
+
+    expect(first.totalCount, 205);
+    expect(first.results, hasLength(200));
+    expect(first.hasMore, isTrue);
+    expect(second.results, hasLength(5));
+    expect(second.hasMore, isFalse);
+    expect(second.nextCursor, isNull);
+    final all = [...first.results, ...second.results];
+    expect(all.map((item) => item.occurrenceId).toSet(), hasLength(205));
+    for (var i = 0; i < all.length; i++) {
+      final range = all[i].range;
+      expect(range.start.grapheme, i * 3);
+      expect(range.end.grapheme, i * 3 + 2);
+      expect(range.exactText, 'אָב');
+      expect(range.occurrenceIndexInSection, i);
+      expect(range.occurrenceCountInSection, 205);
+      final individual = const ReaderSelectionService().buildRangeAnchor(
+        text: text,
+        startGrapheme: i * 3,
+        endGrapheme: i * 3 + 2,
+        layer: 'source',
+        sourceTextHash: 'hash',
+        normalizationProfile: 'search',
+      );
+      expect(range.toJson(), individual!.toJson());
+    }
+  });
+
+  test('normalized overlapping matches keep their source boundaries', () {
+    final result = service.find(
+      bookId: 'book',
+      sectionIndex: 0,
+      layer: 'rendered',
+      text: 'אָאָאָ',
+      textHash: 'rendered-hash',
+      query: 'אא',
+      normalize: options(PluginNormalizationProfile.search),
+    );
+
+    expect(result.totalCount, 2);
+    expect(result.results.map((item) => item.range.start.grapheme), [0, 1]);
+    expect(result.results.map((item) => item.range.end.grapheme), [2, 3]);
+    expect(result.results.map((item) => item.text), ['אָאָ', 'אָאָ']);
+    expect(result.results.first.range.renderedTextHash, 'rendered-hash');
+    expect(result.results.first.range.sourceTextHash, isNull);
+  });
+
+  test('long repeated queries keep the correct anchor occurrence indices', () {
+    final prefix = List.filled(512, 'א').join();
+    final query = '$prefixב';
+    final result = service.find(
+      bookId: 'book',
+      sectionIndex: 0,
+      layer: 'source',
+      text: '$prefix$query $prefix$query',
+      textHash: 'hash',
+      query: query,
+      normalize: options(PluginNormalizationProfile.strict),
+    );
+
+    expect(result.totalCount, 2);
+    expect(result.results.map((item) => item.text), [query, query]);
+    expect(result.results.map((item) => item.range.start.grapheme), [
+      512,
+      1538,
+    ]);
+    expect(result.results.map((item) => item.range.end.grapheme), [1025, 2051]);
+    expect(result.results.map((item) => item.range.occurrenceIndexInSection), [
+      0,
+      1,
+    ]);
+    expect(result.results.map((item) => item.range.occurrenceCountInSection), [
+      2,
+      2,
+    ]);
   });
 
   test('rejects a cursor reused for another query', () {
@@ -248,5 +349,4 @@ void main() {
     );
     expect(result.totalCount, 0);
   });
-
 }

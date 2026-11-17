@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:equatable/equatable.dart';
+import 'package:otzaria/plugins/services/plugin_tab_info.dart';
 import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/tabs/models/tool_tab.dart';
 
 abstract class TabsEvent extends Equatable {
   const TabsEvent();
@@ -179,10 +181,13 @@ class ClearRecentlyClosedTabs extends TabsEvent {
 class SetCurrentTab extends TabsEvent {
   final int index;
 
-  const SetCurrentTab(this.index);
+  /// חלונית בכרטיסייה המשולבת שתהפוך לפעילה; `null` משאיר את הקיימת.
+  final OpenedTab? pane;
+
+  const SetCurrentTab(this.index, {this.pane});
 
   @override
-  List<Object?> get props => [index];
+  List<Object?> get props => [index, pane];
 }
 
 class CloseAllTabs extends TabsEvent {}
@@ -262,6 +267,17 @@ class RenameTab extends TabsEvent {
 
   @override
   List<Object?> get props => [tab, title];
+}
+
+/// כותרת וטולטיפ שתוסף קבע לכרטיסיה שלו (`ui.setTabInfo`).
+class SetPluginTabInfo extends TabsEvent {
+  final ToolTab tab;
+  final PluginTabInfoUpdate update;
+
+  const SetPluginTabInfo(this.tab, this.update);
+
+  @override
+  List<Object?> get props => [tab, update];
 }
 
 class TogglePinTab extends TabsEvent {

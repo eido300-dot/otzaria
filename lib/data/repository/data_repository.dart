@@ -30,6 +30,9 @@ class DataRepository {
   @visibleForTesting
   Future<Library>? get cachedLibraryFutureForTesting => _libraryFuture;
 
+  /// מזהה את טעינת הקטלוג הנוכחית בלי להתחיל טעינה.
+  Object? get libraryCacheIdentity => _libraryFuture;
+
   /// הקטלוג האחרון שהושלם בהצלחה, גם אם בנייה חדשה יותר נכשלה.
   Library? get lastSuccessfulLibrary => _lastSuccessfulLibrary;
   Future<Library> get library =>
@@ -507,9 +510,7 @@ List<int> _searchPreparedEntries(
 }) {
   // מטמון לזוגות (מילת שאילתה, מילת טקסט) — מילים נפוצות ('מסכת', 'על')
   // חוזרות באלפי ספרים ומחושבות פעם אחת בלבד.
-  final pairMemo = {
-    for (final word in queryWords) word: <String, bool>{},
-  };
+  final pairMemo = {for (final word in queryWords) word: <String, bool>{}};
   bool wordMatchesEntry(String queryWord, Set<String> searchWords) {
     final memo = pairMemo[queryWord]!;
     for (final textWord in searchWords) {
@@ -581,7 +582,8 @@ List<int> _searchPreparedEntries(
               eraOrder: entry.eraOrder,
               source: entry.source,
               isExternalCatalog: entry.isExternalCatalog,
-              ratio: bookSearchRatio(normalizedQuery, entry.normalizedTitle),
+              normalizedQuery: normalizedQuery,
+              normalizedTitle: entry.normalizedTitle,
             ),
         ]..sort((a, b) {
           if (a.isExternalCatalog != b.isExternalCatalog) {
@@ -597,14 +599,10 @@ List<int> _searchPreparedEntries(
           return a.index.compareTo(b.index);
         });
 
-    return [
-      for (final entry in scored) entry.index,
-    ];
+    return [for (final entry in scored) entry.index];
   }
 
-  return [
-    for (final match in filtered) match.entry.index,
-  ];
+  return [for (final match in filtered) match.entry.index];
 }
 
 /// האם כל מילות השאילתה מופיעות כמילים שלמות בכותרת, לפי סדרן.
@@ -662,15 +660,18 @@ class _ScoredBookSearchEntry {
   final int eraOrder;
   final BookSource source;
   final bool isExternalCatalog;
-  final int ratio;
+  final String normalizedQuery;
+  final String normalizedTitle;
+  late final int ratio = bookSearchRatio(normalizedQuery, normalizedTitle);
 
-  const _ScoredBookSearchEntry({
+  _ScoredBookSearchEntry({
     required this.index,
     required this.tier,
     required this.eraOrder,
     required this.source,
     required this.isExternalCatalog,
-    required this.ratio,
+    required this.normalizedQuery,
+    required this.normalizedTitle,
   });
 }
 
@@ -679,15 +680,21 @@ class _ScoredBookSearchEntry {
 bool _editDistanceAtMost(String a, String b, int k) {
   final la = a.length;
   final lb = b.length;
-  var prev2 = List<int>.filled(lb + 1, 0);
-  var prev = List<int>.generate(lb + 1, (j) => j);
-  var curr = List<int>.filled(lb + 1, 0);
+  final outsideBand = k + 1;
+  var prev2 = List<int>.filled(lb + 1, outsideBand);
+  var prev = List<int>.generate(lb + 1, (j) => j <= k ? j : outsideBand);
+  var curr = List<int>.filled(lb + 1, outsideBand);
   var prevMin = 0;
   for (var i = 1; i <= la; i++) {
-    curr[0] = i;
-    var rowMin = i;
+    final first = i > k ? i - k : 1;
+    final last = i + k < lb ? i + k : lb;
+    curr[0] = i <= k ? i : outsideBand;
+    // שורות ממוחזרות: תאים מחוץ לפס חייבים להישאר בלתי נגישים.
+    if (first > 1) curr[first - 1] = outsideBand;
+    if (last < lb) curr[last + 1] = outsideBand;
+    var rowMin = curr[0];
     final ca = a.codeUnitAt(i - 1);
-    for (var j = 1; j <= lb; j++) {
+    for (var j = first; j <= last; j++) {
       final cost = ca == b.codeUnitAt(j - 1) ? 0 : 1;
       var best = prev[j - 1] + cost; // substitution
       final deletion = prev[j] + 1;

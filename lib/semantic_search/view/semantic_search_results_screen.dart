@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:otzaria/theme/app_fonts.dart';
 import 'package:fluentui_system_icons/fluentui_system_icons.dart';
 import 'package:flutter/material.dart';
+import 'package:otzaria/theme/app_tokens.dart';
+import 'package:otzaria/widgets/feedback/app_info_banner.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:otzaria/core/messages/library_messages.dart';
@@ -39,6 +41,7 @@ import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
 import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
 import 'package:otzaria/tabs/models/semantic_search_tab.dart';
 import 'package:otzaria/tabs/models/tab.dart';
+import 'package:otzaria/widgets/feedback/loading_indicator.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:otzaria/utils/text/copy_utils.dart';
 import 'package:otzaria/utils/text/text_manipulation.dart' as utils;
@@ -618,8 +621,13 @@ class _SemanticSearchResultsScreenState
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 16),
+                  LoadingIndicator(
+                    key: const ValueKey('semantic-results-stage'),
+                    message: context.settingsText(switch (state.stage) {
+                      SemanticSearchStage.preparing => 'מכין את החיפוש...',
+                      SemanticSearchStage.searching => 'מחפש בספרייה...',
+                    }),
+                  ),
                   ActionButton.neutral(
                     key: const ValueKey('semantic-results-cancel'),
                     text: context.settingsText('עצור'),
@@ -910,25 +918,12 @@ class _NarrowScopeBanner extends StatelessWidget {
   const _NarrowScopeBanner();
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: cs.primaryContainer.withValues(alpha: 0.4),
-      child: Row(
-        children: [
-          Icon(FluentIcons.info_24_regular, size: 16, color: cs.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SemanticNarrowScopeHint(
-              style: TextStyle(fontSize: 13, color: cs.primary),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _SemanticResultsBanner(
+    key: const ValueKey('semantic-narrow-scope-banner'),
+    message: context.settingsText(
+      'החיפוש מדויק יותר כשמצמצמים אותו לספרים או לקטגוריות מסוימות.',
+    ),
+  );
 }
 
 /// החלק הסמנטי נכשל, והתוצאות הן התאמות מילוליות בלבד.
@@ -936,29 +931,32 @@ class _OnlyLexicalBanner extends StatelessWidget {
   const _OnlyLexicalBanner();
 
   @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      key: const ValueKey('semantic-only-lexical-banner'),
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: cs.errorContainer,
-      child: Row(
-        children: [
-          Icon(
-            FluentIcons.warning_24_regular,
-            size: 16,
-            color: cs.onErrorContainer,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              context.settingsText(SemanticSearchMessages.onlyLexicalShown),
-              style: TextStyle(fontSize: 13, color: cs.onErrorContainer),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => _SemanticResultsBanner(
+    key: const ValueKey('semantic-only-lexical-banner'),
+    tone: AppInfoBannerTone.error,
+    message: context.settingsText(SemanticSearchMessages.onlyLexicalShown),
+  );
+}
+
+/// באנר מעל התוצאות, עם מרווח מהקצוות כמו כרטיסי התוצאות.
+class _SemanticResultsBanner extends StatelessWidget {
+  const _SemanticResultsBanner({
+    super.key,
+    required this.message,
+    this.tone = AppInfoBannerTone.info,
+  });
+
+  final String message;
+  final AppInfoBannerTone tone;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      AppTokens.spaceSM,
+      AppTokens.spaceSM,
+      AppTokens.spaceSM,
+      0,
+    ),
+    child: AppInfoBanner(tone: tone, message: message),
+  );
 }
