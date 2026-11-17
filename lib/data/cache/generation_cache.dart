@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart';
+import 'package:otzaria/attached_libraries/models/attached_library.dart';
 import 'package:otzaria/attached_libraries/repository/attached_library_registry.dart';
 import 'package:otzaria/data/data_providers/db_read_worker.dart';
 import 'package:otzaria/data/data_providers/sqlite_data_provider.dart';
@@ -21,7 +23,17 @@ class GenerationCache {
 
   bool _isLoaded = false;
   Future<void>? _loadingFuture;
+  ({Future<void> done, Completer<void> superseded})? _attachedReload;
+  final _attachedReads =
+      <
+        (String, ReadOnlyDbTarget, AttachedLibraryFingerprint),
+        Future<Map<int, int>>
+      >{};
   int _generation = 0;
+  int _revision = 0;
+
+  /// משתנה כשמיפוי הדורות נטען מחדש או מתאפס.
+  int get revision => _revision;
 
   /// דור לפי id ב-seforim.db.
   final Map<int, int> _orderByBookId = <int, int>{};
@@ -55,21 +67,25 @@ class GenerationCache {
   }
 
   Future<void> warmUp() async {
-    // האינדוקס מדרג ספרי מסד מצורף לפי הדור — ממתין לטעינה מחדש שבדרך.
-    final attachedReload = _attachedReload;
-    if (attachedReload != null) {
+    final myGen = _generation;
+    // האינדוקס ממתין לרענון העדכני לפני דירוג ספרים ממסד מצורף.
+    if (_attachedReload != null) {
       try {
-        await attachedReload;
+        await _waitForAttachedReloads(myGen);
       } catch (_) {}
+      if (myGen != _generation) return;
     }
     if (_isLoaded) return;
     if (_loadingFuture != null) return _loadingFuture;
 
-    _loadingFuture = _loadInternal();
+    final loading = _loadInternal();
+    _loadingFuture = loading;
     try {
-      await _loadingFuture;
+      await loading;
     } finally {
-      _loadingFuture = null;
+      // clear() may have started a newer generation while this one awaited.
+      // Never detach that newer in-flight load.
+      if (identical(_loadingFuture, loading)) _loadingFuture = null;
     }
   }
 
@@ -106,12 +122,10 @@ class GenerationCache {
         }
       }
 
-      final localAttached = await _readAttached(myGen);
-
       if (myGen != _generation) return;
-      _orderByAttachedBookId
-        ..clear()
-        ..addAll(localAttached);
+      if (_attachedReload == null) unawaited(reloadAttached());
+      await _waitForAttachedReloads(myGen);
+      if (myGen != _generation) return;
       _orderByBookId
         ..clear()
         ..addAll(local);
@@ -119,6 +133,7 @@ class GenerationCache {
         ..clear()
         ..addAll(localUser);
       _isLoaded = true;
+      _revision++;
       debugPrint(
         '[GenerationCache] Loaded generations for ${_orderByBookId.length} '
         'books (+${_orderByUserBookId.length} user books)',
@@ -134,45 +149,43 @@ class GenerationCache {
     }
   }
 
-  /// טוען מחדש רק את דורות המסדים המצורפים — אחרי צירוף, ניתוק או שינוי
-  /// בקובץ מסד. הדורות של seforim.db ו-user_books.db אינם נקראים שוב.
-  /// [warmUp] ממתין לה, כך שהקורא אינו חייב להמתין בעצמו.
-  Future<void> reloadAttached() {
-    late final Future<void> reload;
-    reload = _reloadAttached().whenComplete(() {
-      if (identical(_attachedReload, reload)) _attachedReload = null;
+  /// טוען מחדש את דורות המסדים המצורפים אחרי צירוף, ניתוק או שינוי בקובץ.
+  /// [changedSlugs] מתיר שיתוף למסדים שלא השתנו. null מבקש קריאות טריות.
+  Future<void> reloadAttached({Set<String>? changedSlugs}) {
+    final superseded = Completer<void>();
+    final done = _reloadAttached(superseded, changedSlugs).whenComplete(() {
+      if (identical(_attachedReload?.superseded, superseded)) {
+        _attachedReload = null;
+      }
     });
-    return _attachedReload = reload;
+    _attachedReload?.superseded.complete();
+    _attachedReload = (done: done, superseded: superseded);
+    return done;
   }
 
-  Future<void>? _attachedReload;
-
-  Future<void> _reloadAttached() async {
-    final myGen = _generation;
-    final localAttached = await _readAttached(myGen);
-    if (myGen != _generation) return;
+  Future<void> _reloadAttached(
+    Completer<void> superseded,
+    Set<String>? changedSlugs,
+  ) async {
+    final localAttached = await _readAttached(changedSlugs);
+    if (superseded.isCompleted) return;
     _orderByAttachedBookId
       ..clear()
       ..addAll(localAttached);
+    _revision++;
   }
 
-  /// כל מסד נקרא ב-isolate בפתיחה מוקשחת לפי נתיב, במקביל — קריאה סינכרונית
-  /// של מסד גדול (או בכונן רשת) לא תקפיא את ה-UI.
-  Future<Map<String, Map<int, int>>> _readAttached(int myGen) async {
+  /// כל מסד נקרא ב-isolate בפתיחה מוקשחת לפי נתיב, במקביל.
+  Future<Map<String, Map<int, int>>> _readAttached(
+    Set<String>? changedSlugs,
+  ) async {
     final localAttached = <String, Map<int, int>>{};
     await Future.wait([
       for (final library in AttachedLibraryRegistry.instance.visibleLibraries)
         () async {
-          final path = library.path;
-          final immutable = library.immutable;
           try {
-            final orders = await readGenerationsInIsolate((
-              path: path,
-              untrusted: true,
-              immutable: immutable,
-            )).timeout(AttachedLibraryRegistry.openTimeout);
-            if (myGen != _generation || orders.isEmpty) return;
-            localAttached[library.slug] = orders;
+            final orders = await _readAttachedLibrary(library, changedSlugs);
+            if (orders.isNotEmpty) localAttached[library.slug] = orders;
           } catch (e) {
             debugPrint(
               '[GenerationCache] ${library.slug} generations skipped: $e',
@@ -182,6 +195,44 @@ class GenerationCache {
     ]);
     return localAttached;
   }
+
+  Future<Map<int, int>> _readAttachedLibrary(
+    AttachedLibrary library,
+    Set<String>? changedSlugs,
+  ) {
+    final target = (
+      path: library.path,
+      untrusted: true,
+      immutable: library.immutable,
+    );
+    final timeout = AttachedLibraryRegistry.openTimeout;
+    final fingerprint = library.fingerprint;
+    if (fingerprint == null) {
+      return readAttachedGenerations(target).timeout(timeout);
+    }
+    final key = (library.slug, target, fingerprint);
+    final inFlight =
+        changedSlugs != null && !changedSlugs.contains(library.slug)
+        ? _attachedReads[key]
+        : null;
+    final read =
+        inFlight ?? (_attachedReads[key] = readAttachedGenerations(target));
+    return read.timeout(timeout).whenComplete(() {
+      if (identical(_attachedReads[key], read)) _attachedReads.remove(key);
+    });
+  }
+
+  Future<void> _waitForAttachedReloads(int myGen) async {
+    while (myGen == _generation) {
+      final reload = _attachedReload;
+      if (reload == null) return;
+      await Future.any([reload.done, reload.superseded.future]);
+    }
+  }
+
+  @visibleForTesting
+  static Future<Map<int, int>> Function(ReadOnlyDbTarget)
+  readAttachedGenerations = readGenerationsInIsolate;
 
   /// מתודה סטטית: closure בתוך מתודה אסינכרונית לוכד את כל ההקשר שלה, ועלול
   /// להכיל אובייקט שאינו עובר ל-isolate.
@@ -235,11 +286,15 @@ class GenerationCache {
 
   void clear() {
     _generation++;
+    _revision++;
     _orderByAttachedBookId.clear();
     _orderByBookId.clear();
     _orderByUserBookId.clear();
     _isLoaded = false;
     _loadingFuture = null;
+    _attachedReload?.superseded.complete();
+    _attachedReload = null;
+    _attachedReads.clear();
   }
 
   /// סדר הדור לפי שם מנורמל (ללא גרשיים), מחושב פעם אחת. נקרא לכל ספר

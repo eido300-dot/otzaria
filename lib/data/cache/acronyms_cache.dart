@@ -54,6 +54,10 @@ class AcronymsCache {
 
   /// מונה דורות לזיהוי [clear] שקרה במהלך טעינה.
   int _generation = 0;
+  int _revision = 0;
+
+  /// משתנה כשכינויי הספרים משתנים, כולל השלמת טעינה של מסד מצורף.
+  int get revision => _revision;
 
   final Map<int, List<String>> _acronymsByBookId = <int, List<String>>{};
   final Map<int, Set<String>> _quotedWordsByBookId = <int, Set<String>>{};
@@ -131,6 +135,7 @@ class AcronymsCache {
             ).timeout(AttachedLibraryRegistry.openTimeout);
             if (myGen != _attachedGeneration) return;
             _attachedAcronyms[library.slug] = terms;
+            if (terms.isNotEmpty) _revision++;
             _attachedRetryAfter.remove(library.slug);
           } catch (e) {
             debugPrint('[AcronymsCache] ${library.slug} acronyms skipped: $e');
@@ -146,6 +151,7 @@ class AcronymsCache {
   /// שוכח את כינויי המסדים המצורפים; הם נטענים שוב בגישה הבאה.
   void clearAttached() {
     _attachedGeneration++;
+    _revision++;
     _attachedAcronyms.clear();
     _attachedRetryAfter.clear();
     _attachedLoading = null;
@@ -164,12 +170,16 @@ class AcronymsCache {
         "AND name = 'book_acronym'",
       );
       if (hasTable.isEmpty) return const {};
-      final rows = db.select('SELECT bookId, term FROM book_acronym');
-      return buildAcronymCacheData([
-        for (final row in rows)
-          if (row['bookId'] is int && row['term'] is String)
-            (row['bookId'] as int, row['term'] as String),
-      ]).acronymsByBookId;
+      final acronymsByBookId = <int, List<String>>{};
+      for (final row in db.select('SELECT bookId, term FROM book_acronym')) {
+        final bookId = row['bookId'];
+        final term = row['term'];
+        if (bookId is! int || term is! String || term.isEmpty) continue;
+        final normalized = normalizeForFindRefMatch(term);
+        if (normalized.isEmpty) continue;
+        acronymsByBookId.putIfAbsent(bookId, () => <String>[]).add(normalized);
+      }
+      return acronymsByBookId;
     } finally {
       db.close();
     }
@@ -207,12 +217,14 @@ class AcronymsCache {
     if (_isLoaded) return;
     if (_loadingFuture != null) return _loadingFuture;
 
-    _loadingFuture = _loadInternal();
-
+    final loading = _loadInternal();
+    _loadingFuture = loading;
     try {
-      await _loadingFuture;
+      await loading;
     } finally {
-      _loadingFuture = null;
+      // clear() may have started a newer generation while this one awaited.
+      // Never detach that newer in-flight load.
+      if (identical(_loadingFuture, loading)) _loadingFuture = null;
     }
   }
 
@@ -245,6 +257,7 @@ class AcronymsCache {
         ..clear()
         ..addAll(data.quotedWordsByBookId);
       _isLoaded = true;
+      _revision++;
       debugPrint(
         '[AcronymsCache] Loaded ${data.rowCount} acronyms for ${_acronymsByBookId.length} books',
       );
@@ -262,10 +275,7 @@ class AcronymsCache {
 
   void clear() {
     _generation++;
-    _attachedGeneration++;
-    _attachedAcronyms.clear();
-    _attachedRetryAfter.clear();
-    _attachedLoading = null;
+    clearAttached();
     _acronymsByBookId.clear();
     _bookIdsByBigram.clear();
     _quotedWordsByBookId.clear();
@@ -290,6 +300,7 @@ class AcronymsCache {
       ..clear()
       ..addAll(data.quotedWordsByBookId);
     _isLoaded = true;
+    _revision++;
   }
 }
 

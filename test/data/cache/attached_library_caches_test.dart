@@ -6,11 +6,16 @@ import 'package:otzaria/attached_libraries/models/attached_library.dart';
 import 'package:otzaria/attached_libraries/repository/attached_library_registry.dart';
 import 'package:otzaria/data/cache/acronyms_cache.dart';
 import 'package:otzaria/data/cache/generation_cache.dart';
+import 'package:otzaria/data/repository/data_repository.dart';
+import 'package:otzaria/library/models/library.dart';
 import 'package:otzaria/migration/database/untrusted_database.dart';
 import 'package:otzaria/models/book_source.dart';
+import 'package:otzaria/models/books.dart';
 import 'package:otzaria/services/commentary_service.dart';
+import 'package:otzaria/settings/engine/app_settings_store.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
+import '../../helpers/memory_settings_cache.dart';
 import '../../helpers/seforim_fixture_db.dart';
 
 void main() {
@@ -103,6 +108,53 @@ void main() {
     expect(AcronymsCache.instance.acronymsFor(source, bookId), isNull);
   });
 
+  test(
+    'מטמון החיפוש מתעדכן כשמטא־דאטה מצורפת נטענת אחרי החיפוש הראשון',
+    () async {
+      await Settings.init(cacheProvider: MemorySettingsCache());
+      final repository = DataRepository();
+      addTearDown(repository.bookSearchWorkerForTesting.dispose);
+      final ranked = TextBook(id: bookId, title: 'דף מבחן', source: source);
+      final unranked = TextBook(
+        id: bookId + 1000,
+        title: 'דף מבחן',
+        source: source,
+      );
+      final root = Library(categories: [])..books.addAll([unranked, ranked]);
+      Future<List<Book>> search(String query) async =>
+          (await repository.findBooksAndCategories(
+            query,
+            root,
+            includeLocalHebrewBooks: false,
+            reuseCatalog: true,
+          )).books;
+
+      expect(await search('דף מבחן'), [same(unranked), same(ranked)]);
+      expect(await search('abcdxyz'), isEmpty);
+
+      createDb((db) {
+        db.execute('INSERT INTO book_acronym VALUES (?, ?)', [
+          bookId,
+          'abcdxyz',
+        ]);
+        db.execute('UPDATE generation SET name = ?', [
+          CommentaryEra.rishonim.hebrewName,
+        ]);
+      });
+      await AcronymsCache.instance.warmUpAttached();
+      expect(await search('abcdxyz'), [same(ranked)]);
+
+      await GenerationCache.instance.reloadAttached();
+      expect(await search('דף מבחן'), [same(ranked), same(unranked)]);
+
+      registry.update([]);
+      AcronymsCache.instance.clearAttached();
+      await GenerationCache.instance.reloadAttached();
+      expect(await search('abcdxyz'), isEmpty);
+      expect(await search('דף מבחן'), [same(unranked), same(ranked)]);
+    },
+  );
+
   test('דורות המסד המצורף נקראים ב-isolate לפי נתיב', () {
     final path = createDb(
       (db) => db.execute('UPDATE generation SET name = ?', [
@@ -151,6 +203,122 @@ void main() {
     );
   });
 
+  test('חימום שממתין לרענון מקבל את רשימת המסדים העדכנית', () async {
+    final cache = GenerationCache.instance;
+    registry.update([]);
+    final firstReload = cache.reloadAttached();
+    final warming = cache.warmUp();
+
+    final intermediateReload = cache.reloadAttached();
+    createDb(
+      (db) => db.execute('UPDATE generation SET name = ?', [
+        CommentaryEra.rishonim.hebrewName,
+      ]),
+    );
+    final latestReload = cache.reloadAttached();
+
+    await warming;
+    final orderAtWarmUp = cache.getOrderForBook(bookId, source);
+    await Future.wait([firstReload, intermediateReload, latestReload]);
+    expect(orderAtWarmUp, CommentaryEra.rishonim.order);
+    expect(cache.getOrderForBook(bookId, source), CommentaryEra.rishonim.order);
+  });
+
+  test('איפוס מבטל רענון ישן כחסם לחימום ומשאיר את המטמון ריק', () async {
+    final cache = GenerationCache.instance;
+    createDb(
+      (db) => db.execute('UPDATE generation SET name = ?', [
+        CommentaryEra.rishonim.hebrewName,
+      ]),
+    );
+    final obsolete = cache.reloadAttached().then((_) => 'רענון ישן');
+
+    cache.clear();
+    registry.update([]);
+    final warming = cache.warmUp().then((_) => 'חימום חדש');
+    final first = await Future.any([obsolete, warming]);
+
+    await Future.wait([obsolete, warming]);
+    expect(first, 'חימום חדש');
+    expect(cache.getOrderForBook(bookId, source), CommentaryEra.other.order);
+  });
+
+  test('הסרת מסד באמצע רענון משאירה רק את הקריאה המשותפת', () async {
+    final cache = GenerationCache.instance;
+    final slow = Completer<Map<int, int>>();
+    final kept = Completer<Map<int, int>>();
+    final reads = <String>[];
+    final previousReader = GenerationCache.readAttachedGenerations;
+    GenerationCache.readAttachedGenerations = (target) {
+      reads.add(target.path);
+      return target.path == 'slow' ? slow.future : kept.future;
+    };
+    addTearDown(() {
+      GenerationCache.readAttachedGenerations = previousReader;
+      if (!slow.isCompleted) slow.complete({});
+      if (!kept.isCompleted) kept.complete({});
+    });
+    final keptLibrary = AttachedLibrary(
+      slug: 'lib-a',
+      displayName: 'Kept',
+      path: 'kept',
+      fingerprint: const AttachedLibraryFingerprint(size: 10, modifiedMs: 1),
+      addedAt: DateTime(2026),
+    );
+    registry.update([
+      keptLibrary,
+      keptLibrary.copyWith(slug: 'slow', path: 'slow'),
+    ]);
+    final stale = cache.reloadAttached(changedSlugs: const {});
+    final warming = cache.warmUp();
+    registry.update([keptLibrary]);
+    final latest = cache.reloadAttached(changedSlugs: const {});
+    expect(reads, unorderedEquals(['kept', 'slow']));
+
+    kept.complete({bookId: CommentaryEra.rishonim.order});
+    await Future.wait([latest, warming]).timeout(const Duration(seconds: 2));
+    expect(cache.getOrderForBook(bookId, source), CommentaryEra.rishonim.order);
+    slow.complete({bookId: CommentaryEra.chazal.order});
+    await stale;
+    expect(
+      cache.getOrderForBook(bookId, BookSource.attached('slow')),
+      CommentaryEra.other.order,
+    );
+  });
+
+  test('שינוי תוכן מצריך קריאה חדשה גם לאותה טביעת אצבע', () async {
+    final cache = GenerationCache.instance;
+    final first = Completer<Map<int, int>>();
+    final second = Completer<Map<int, int>>();
+    final reads = [first, second].iterator;
+    final previousReader = GenerationCache.readAttachedGenerations;
+    GenerationCache.readAttachedGenerations = (_) {
+      expect(reads.moveNext(), isTrue);
+      return reads.current.future;
+    };
+    addTearDown(() {
+      GenerationCache.readAttachedGenerations = previousReader;
+      if (!first.isCompleted) first.complete({});
+      if (!second.isCompleted) second.complete({});
+    });
+    registry.update([
+      AttachedLibrary(
+        slug: 'lib-a',
+        displayName: 'Library',
+        path: 'library',
+        fingerprint: const AttachedLibraryFingerprint(size: 10, modifiedMs: 1),
+        addedAt: DateTime(2026),
+      ),
+    ]);
+    final stale = cache.reloadAttached(changedSlugs: const {});
+    final latest = cache.reloadAttached(changedSlugs: const {'lib-a'});
+    second.complete({bookId: CommentaryEra.rishonim.order});
+    await latest.timeout(const Duration(seconds: 2));
+    first.complete({bookId: CommentaryEra.chazal.order});
+    await stale;
+    expect(cache.getOrderForBook(bookId, source), CommentaryEra.rishonim.order);
+  });
+
   test('כשל קריאת כינויים אינו נשמר כ"אין כינויים" — ניסיון חוזר', () async {
     final previousDelay = AcronymsCache.attachedRetryDelay;
     addTearDown(() => AcronymsCache.attachedRetryDelay = previousDelay);
@@ -193,5 +361,49 @@ void main() {
     }
     await second;
     expect(AcronymsCache.instance.acronymsFor(source, bookId), isNotEmpty);
+  });
+
+  test('כינויים מנורמלים נשמרים לפי מסד ובסדר הקריאה', () async {
+    const termsBySlug = {
+      'lib-a': ['רש״י', 'רשב״ם', 'רַשִׁ״י', '', '!?'],
+      'lib-b': ['ABC!'],
+      'lib-c': ['ספר־המוסר'],
+    };
+    final libraries = <AttachedLibrary>[];
+    for (final MapEntry(key: slug, value: terms) in termsBySlug.entries) {
+      final path = '${tempDir.path}/$slug.db';
+      final db = sqlite3.sqlite3.open(path);
+      try {
+        db.execute('CREATE TABLE book_acronym (bookId, term)');
+        for (final term in terms) {
+          db.execute('INSERT INTO book_acronym VALUES (?, ?)', [bookId, term]);
+        }
+        db.execute("INSERT INTO book_acronym VALUES ('invalid', 'כינוי')");
+        db.execute('INSERT INTO book_acronym VALUES (?, NULL)', [bookId]);
+      } finally {
+        db.close();
+      }
+      libraries.add(
+        AttachedLibrary(
+          slug: slug,
+          displayName: slug,
+          path: path,
+          addedAt: DateTime(2026),
+        ),
+      );
+    }
+    registry.update(libraries);
+
+    await AcronymsCache.instance.warmUpAttached();
+    final cache = AcronymsCache.instance;
+    expect(cache.attachedAcronymsOf('lib-a'), {
+      bookId: ['רשי', 'רשבם', 'רשי'],
+    });
+    expect(cache.attachedAcronymsOf('lib-b'), {
+      bookId: ['abc'],
+    });
+    expect(cache.attachedAcronymsOf('lib-c'), {
+      bookId: ['ספר המוסר'],
+    });
   });
 }

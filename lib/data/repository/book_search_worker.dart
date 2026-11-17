@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
@@ -24,7 +25,8 @@ class BookSearchWorker {
   /// הרשומות שהאינדקס ב-worker נבנה מהן.
   List<BookSearchEntry>? _workerEntries;
 
-  final List<_BookSearchJob> _queue = [];
+  // FIFO dequeue must remain O(1) even with many queued search requests.
+  final Queue<_BookSearchJob> _queue = Queue<_BookSearchJob>();
   _BookSearchJob? _inFlight;
   Completer<List<int>>? _reply;
 
@@ -60,7 +62,7 @@ class BookSearchWorker {
 
   void _pump() {
     if (_inFlight != null || _queue.isEmpty) return;
-    final job = _inFlight = _queue.removeAt(0);
+    final job = _inFlight = _queue.removeFirst();
     unawaited(_run(job));
   }
 
@@ -92,10 +94,10 @@ class BookSearchWorker {
       throw StateError('book search worker disposed before sending');
     }
     if (!_sameEntries(_workerEntries, job.entries)) {
-      _workerEntries = job.entries;
       indexUploads++;
       port.send(_SetIndexMessage(job.entries));
     }
+    _workerEntries = job.entries;
     final reply = _reply = Completer<List<int>>();
     port.send(job.query);
     return reply.future;

@@ -9,6 +9,7 @@ import 'package:otzaria/plugins/services/plugin_discard_policy.dart';
 import 'package:otzaria/plugins/services/plugin_runtime_dispatcher.dart';
 import 'package:otzaria/app_report/repository/app_report_collector.dart';
 import 'package:otzaria/app_report/repository/error_log_blocks.dart';
+import 'package:otzaria/app_report/services/recent_book_opens.dart';
 import 'package:otzaria/core/app_paths.dart';
 import 'package:otzaria/core/diagnostics/app_context_snapshot.dart';
 import 'package:otzaria/core/diagnostics/developer_diagnostics.dart';
@@ -105,6 +106,44 @@ void main() {
       clock: () => now,
     ).collectDiagnostics();
     expect(diagnostics['state'], containsPair('webview2Prewarm', 'ok 12ms'));
+  });
+
+  test('אבחון: ניסיונות פתיחת הספרים האחרונים, רק בהפעלה הנוכחית', () async {
+    final previous = RecentBookOpens.instance;
+    final opens = RecentBookOpens.instance = RecentBookOpens(
+      stallThreshold: null,
+      now: () => now,
+    );
+    addTearDown(() => RecentBookOpens.instance = previous);
+    opens
+        .start(TextBook(title: 'בראשית', id: 7), BookOpenKind.text)
+        .finish(BookOpenOutcome.loaded);
+
+    final diagnostics = await AppReportCollector(
+      redactor: redactor,
+      appInfoLoader: () async => {},
+      clock: () => now,
+    ).collectDiagnostics();
+    final attempts = (diagnostics['recentBookOpens'] as Map)['attempts'];
+    expect(attempts, [
+      {
+        'at': now.toUtc().toIso8601String(),
+        'title': 'בראשית',
+        'kind': 'text',
+        'outcome': 'loaded',
+        'durationMs': 0,
+        'source': 'o',
+        'id': 7,
+      },
+    ]);
+
+    final previousRun = await AppReportCollector(
+      redactor: redactor,
+      appInfoLoader: () async => {},
+      includeCurrentContext: false,
+      clock: () => now,
+    ).collectDiagnostics();
+    expect(previousRun.containsKey('recentBookOpens'), isFalse);
   });
 
   test('אבחון: הגופנים שנבחרו נכללים במצב', () async {
@@ -357,12 +396,75 @@ void main() {
         redactor: redactor,
         appInfoLoader: () async => {},
         includeCurrentContext: false,
+        previousRunContext: () async => null,
         clock: () => now,
       ).collectDiagnostics();
       expect(diagnostics.containsKey('context'), isFalse);
       expect(diagnostics.containsKey('inputFocus'), isFalse);
       expect(diagnostics.containsKey('searches'), isFalse);
+      expect(diagnostics.containsKey('previousRun'), isFalse);
     });
+
+    test('קריסה מהפעלה קודמת: ההקשר שהיא שמרה', () async {
+      final saved = {
+        'savedAt': '2026-09-17T09:59:58.000Z',
+        'pid': 4242,
+        'context': {'screen': 'search', 'currentTab': 'SearchingTab'},
+        'searches': {'activeCount': 1, 'lexical': <Object?>[]},
+      };
+      final diagnostics = await AppReportCollector(
+        redactor: redactor,
+        appInfoLoader: () async => {},
+        includeCurrentContext: false,
+        previousRunContext: () async => saved,
+        clock: () => now,
+      ).collectDiagnostics();
+      expect(diagnostics['previousRun'], saved);
+      expect(diagnostics.containsKey('context'), isFalse);
+    });
+
+    test('דוח על ההפעלה הנוכחית: בלי ההקשר של הקודמת', () async {
+      var asked = false;
+      final diagnostics = await AppReportCollector(
+        redactor: redactor,
+        appInfoLoader: () async => {},
+        currentContext: () => {'screen': 'reading'},
+        previousRunContext: () async {
+          asked = true;
+          return {'pid': 1};
+        },
+        clock: () => now,
+      ).collectDiagnostics();
+      expect(diagnostics.containsKey('previousRun'), isFalse);
+      expect(asked, isFalse);
+    });
+
+    test(
+      'תוצאות לשונית החיפוש נכנסות רק כשהלשונית הנוכחית היא חיפוש',
+      () async {
+        Future<Map<String, dynamic>> collect(
+          Map<String, Object?>? results, {
+          bool includeCurrentContext = true,
+        }) => AppReportCollector(
+          redactor: redactor,
+          appInfoLoader: () async => {},
+          searchResults: () => results,
+          includeCurrentContext: includeCurrentContext,
+          clock: () => now,
+        ).collectDiagnostics();
+
+        final results = {'kind': 'lexical', 'unhighlighted': 2};
+        expect((await collect(results))['searchResults'], results);
+        expect((await collect(null)).containsKey('searchResults'), isFalse);
+        expect(
+          (await collect(
+            results,
+            includeCurrentContext: false,
+          )).containsKey('searchResults'),
+          isFalse,
+        );
+      },
+    );
 
     test('כרטיסיית חיפוש: השאילתה לא נכנסת לכותרת', () {
       final tab = SearchingTab(

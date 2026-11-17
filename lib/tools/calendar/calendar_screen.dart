@@ -514,7 +514,6 @@ class CalendarWidgetState extends State<CalendarWidget> {
         ContextOverlayPanel(
           isOpen: _isSettingsPanelOpen,
           onClose: _toggleSettingsPanel,
-          width: 400,
           title: 'הגדרות',
           child: const Expanded(
             child: CalendarSettingsPanel(),
@@ -568,7 +567,6 @@ class CalendarWidgetState extends State<CalendarWidget> {
         ContextOverlayPanel(
           isOpen: _isSettingsPanelOpen,
           onClose: _toggleSettingsPanel,
-          width: 400,
           child: Column(
             children: [
               Padding(
@@ -775,6 +773,7 @@ class CalendarWidgetState extends State<CalendarWidget> {
     showCalendarPrintDialog(
       context: context,
       calendarView: state.calendarView,
+      enabledZmanim: state.enabledZmanim,
       closeShortcut: _shortcutActivator(
         context.read<SettingsBloc>().state.shortcuts,
         'key-shortcut-print',

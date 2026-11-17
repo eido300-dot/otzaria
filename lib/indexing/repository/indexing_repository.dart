@@ -153,8 +153,8 @@ class IndexingRepository {
   static IndexCommitPolicy Function() newCommitPolicy = IndexCommitPolicy.new;
 
   @visibleForTesting
-  static Future<BookSourceHashes> Function({Iterable<String> attachedSlugs})
-  loadSourceHashes = BookSourceHashes.load;
+  static Future<BookSourceHashes> Function(Iterable<Book> books)
+  loadSourceHashes = BookSourceHashes.loadForBooks;
 
   @visibleForTesting
   static Future<BigInt> Function({required List<int> text}) contentFingerprint =
@@ -833,9 +833,7 @@ class IndexingRepository {
             ? 0
             : PdfExtractionPrefetcher.defaultMaxInFlight,
       );
-      final sourceHashes = await loadSourceHashes(
-        attachedSlugs: [for (final book in allBooks) ?_attachedSlug(book)],
-      );
+      final sourceHashes = await loadSourceHashes(allBooks);
       await Future.wait([
         GenerationCache.instance.warmUp(),
         ReferenceBooksCache.instance.warmUp(),
@@ -1808,10 +1806,11 @@ class IndexingRepository {
       );
       if (extracted == null) return empty;
 
+      final references = PdfPageReferenceLookup(outline, book.title);
       final pages = <({String reference, String text, int pageIndex})>[];
       for (final entry in extracted.texts.entries) {
         final i = entry.key;
-        final bookmark = referenceFromPageNumber(i + 1, outline, book.title);
+        final bookmark = references.referenceAt(i + 1);
         final ref = bookmark.isNotEmpty
             ? '${book.title}, $bookmark, עמוד ${i + 1}'
             : '${book.title}, עמוד ${i + 1}';
@@ -1898,13 +1897,10 @@ class IndexingRepository {
         ? ocrText.split('\f')
         : <String>[ocrText];
 
+    final references = PdfPageReferenceLookup(outline, book.title);
     final pages = <({String reference, String text, int pageIndex})>[];
     for (int pageIndex = 0; pageIndex < pagesText.length; pageIndex++) {
-      final bookmark = referenceFromPageNumber(
-        pageIndex + 1,
-        outline,
-        book.title,
-      );
+      final bookmark = references.referenceAt(pageIndex + 1);
       final ref = bookmark.isNotEmpty
           ? '${book.title}, $bookmark, עמוד ${pageIndex + 1}'
           : '${book.title}, עמוד ${pageIndex + 1}';
@@ -1970,7 +1966,13 @@ class IndexingRepository {
   /// השורות (0-based, לפי `\n`) ש-[stripDataUrisForIndex] מסיר מהן data URI.
   /// המנוע שומר את הטקסט המנוקה שלהן באינדקס במקום לקרוא מהמסד את התמונה.
   @visibleForTesting
-  static Uint32List dataUriLineOrdinals(Uint8List bytes) {
+  static Uint32List dataUriLineOrdinals(Uint8List bytes) =>
+      Uint32List.fromList(_scanDataUriBytes(bytes));
+
+  static List<int> _scanDataUriBytes(
+    Uint8List bytes, {
+    void Function(int start, int end)? onSpan,
+  }) {
     final lines = <int>[];
     var line = 0;
     var i = 0;
@@ -1988,16 +1990,16 @@ class IndexingRepository {
         while (end < bytes.length && _isDataUriChar(bytes[end])) {
           end++;
         }
-        if (end - i - 5 >= _minDataUriPayload &&
-            (lines.isEmpty || lines.last != line)) {
-          lines.add(line);
+        if (end - i - 5 >= _minDataUriPayload) {
+          if (lines.isEmpty || lines.last != line) lines.add(line);
+          onSpan?.call(i, end);
         }
         i = end;
         continue;
       }
       i++;
     }
-    return Uint32List.fromList(lines);
+    return lines;
   }
 
   static bool _isDataUriChar(int c) =>
@@ -2012,9 +2014,7 @@ class IndexingRepository {
       c == 0x2E || // .
       c == 0x2D; // -
 
-  /// מעל הסף הזה (בייטים או תווים) עבודת ה-data URI מפסיקה לרוץ ברצף על
-  /// ה-thread שמצייר פריימים. נמדד על ספר מצויר (226MiB): סריקה + פענוח +
-  /// בנייה מחדש = 1.4 שניות. מתחת לסף הכול יחד הוא מילישניות בודדות.
+  /// מעל הסף הזה עבודת ה-data URI נפרסת למנות או עוברת ל-isolate.
   static const int _dataUriOffFrameThreshold = 1 << 20;
 
   /// מנת הסריקה. נמדד 0.72ms/MiB, ולכן 4MiB ≈ 4.4ms — בתוך תקציב פריים גם
@@ -2023,7 +2023,7 @@ class IndexingRepository {
 
   /// זהה ל-[bytesContainDataUriScheme] + [stripDataUrisForIndex], בלי לחסום
   /// פריים בספר גדול: הסריקה נפרסת למנות על ה-thread הקורא, ורק כשנמצא
-  /// `data:` הפענוח והבנייה מחדש עוברים ל-isolate. [bytes] נשמר רק כשהוא
+  /// `data:` הניקוי ופענוח הטקסט הנותר עוברים ל-isolate. [bytes] נשמר רק כשהוא
   /// נקי; אחרת [text] מחזיק את המקור המנוקה, ו-[dataUriLines] את
   /// [dataUriLineOrdinals] שלו (null כשאין).
   ///
@@ -2055,11 +2055,33 @@ class IndexingRepository {
   static ({String text, Uint32List? lines}) _stripDataUriBytes(
     Uint8List bytes,
   ) {
-    final lines = dataUriLineOrdinals(bytes);
-    return (
-      text: stripDataUrisForIndex(utf8.decode(bytes, allowMalformed: true)),
-      lines: lines.isEmpty ? null : lines,
+    const decoder = Utf8Decoder(allowMalformed: true);
+    final text = StringBuffer();
+    var copiedUpTo = 0;
+
+    void decodeRetained(int end) {
+      // המפענח מדלג על BOM בתחילת כל מקטע; רק BOM בתחילת המקור מושמט.
+      if (copiedUpTo != 0 &&
+          end - copiedUpTo >= 3 &&
+          bytes[copiedUpTo] == 0xef &&
+          bytes[copiedUpTo + 1] == 0xbb &&
+          bytes[copiedUpTo + 2] == 0xbf) {
+        text.writeCharCode(0xfeff);
+      }
+      text.write(decoder.convert(bytes, copiedUpTo, end));
+    }
+
+    final lines = _scanDataUriBytes(
+      bytes,
+      onSpan: (start, end) {
+        // פענוח נפרד בכל צד של ה-URI שומר על התנהגות ב-UTF-8 פגום.
+        decodeRetained(start);
+        copiedUpTo = end;
+      },
     );
+    if (lines.isEmpty) return (text: decoder.convert(bytes), lines: null);
+    decodeRetained(bytes.length);
+    return (text: text.toString(), lines: Uint32List.fromList(lines));
   }
 
   /// המנות חופפות ב-4 בייטים — בלי החפיפה `data:` שיושב על תפר בין מנות
@@ -2269,17 +2291,8 @@ class IndexingRepository {
 
   /// חותם התוכן של המסד לספר שנקרא מהמסד (רשמי או מצורף); null לכל השאר.
   static BigInt? _dbSourceHash(Book book, BookSourceHashes hashes) {
-    final id = book.id;
-    if (book is! TextBook || id == null) return null;
-    if (book.filePath?.trim().isNotEmpty ?? false) return null;
-    final key = BookIdentity.indexedFilePath(book);
-    final fromDb = switch (book.source) {
-      OfficialBookSource() => key == BookIdentity.officialBookKey(id),
-      AttachedBookSource(:final slug) =>
-        key == BookIdentity.attachedBookKey(slug, id),
-      _ => false,
-    };
-    return fromDb ? hashes.forSource(book.source, id) : null;
+    final id = BookSourceHashes.sourceBookId(book);
+    return id == null ? null : hashes.forSource(book.source, id);
   }
 
   /// סדר הקטלוג והדורות של כל ספר בר-אינדוקס בעץ [library], לפי מפתח האינדקס.
@@ -2293,20 +2306,21 @@ class IndexingRepository {
       GenerationCache.instance.warmUp(),
       ReferenceBooksCache.instance.warmUp(),
     ]);
-    final positions = SearchCatalogueOrderHelper.buildKeyOrderMap<String>(
-      library,
-      keyOf: (book) => BookIdentity.keyOf(book as Book),
-    );
-    final entries = <String, BookOrderEntry>{};
-    for (final book in SearchCatalogueOrderHelper.buildOrderedKeys<Book>(
+    final orderedBooks = SearchCatalogueOrderHelper.buildOrderedKeys<Book>(
       library,
       keyOf: (book) => book as Book,
-    )) {
+    );
+    final positions = <String, int>{};
+    final entries = <String, BookOrderEntry>{};
+    for (var index = 0; index < orderedBooks.length; index++) {
+      final book = orderedBooks[index];
+      final identity = BookIdentity.keyOf(book);
+      final position = positions.putIfAbsent(identity, () => index);
       if (!isIndexableBook(book)) continue;
-      final key = BookIdentity.indexedFilePath(book);
+      final key = BookIdentity.indexedFilePath(book, catalogueKey: identity);
       entries[key] ??= BookOrderEntry(
         filePath: key,
-        catalogueOrder: _catalogueOrderOf(BookIdentity.keyOf(book), positions),
+        catalogueOrder: _catalogueOrderOf(identity, position),
         generationOrder: chronologicalOrderForBook(book),
       );
     }
@@ -2332,8 +2346,7 @@ class IndexingRepository {
   static const _personalOrderBase = 1 << 23;
   static const _maxCatalogueOrder = 0xFFFFFFFF;
 
-  static int _catalogueOrderOf(String key, Map<String, int> positions) {
-    final position = positions[key]!;
+  static int _catalogueOrderOf(String key, int position) {
     if (!key.startsWith('uid:')) return position;
     final id = int.tryParse(key.substring(4));
     if (id == null || id < 0 || 'uid:$id' != key) return position;
@@ -2898,12 +2911,7 @@ class StampChangeDetector implements IndexChangeDetector {
     ]);
     final sourceHashes =
         await (_loadSourceHashes?.call(indexed) ??
-            IndexingRepository.loadSourceHashes(
-              attachedSlugs: [
-                for (final book in indexed)
-                  ?IndexingRepository._attachedSlug(book),
-              ],
-            ));
+            IndexingRepository.loadSourceHashes(indexed));
 
     final total = indexed.length;
     onProgress?.call(0, total);

@@ -1913,7 +1913,7 @@ void main() {
 
   group('כתיבה עם חותם המסד', () {
     tearDown(
-      () => IndexingRepository.loadSourceHashes = BookSourceHashes.load,
+      () => IndexingRepository.loadSourceHashes = BookSourceHashes.loadForBooks,
     );
 
     test('ספר רשמי וסמן ריק נכתבים עם book.contentHash של המסד', () async {
@@ -1922,9 +1922,10 @@ void main() {
       final withText = TextBook(id: 5, title: 'שבת');
       final empty = TextBook(id: 6, title: 'ריק');
       final personal = TextBook(id: 7, title: 'אישי', source: BookSource.user);
-      IndexingRepository.loadSourceHashes =
-          ({attachedSlugs = const []}) async =>
-              BookSourceHashes({5: BigInt.from(50), 6: BigInt.from(60)}, {});
+      IndexingRepository.loadSourceHashes = (books) async {
+        expect(books.map((book) => book.id), containsAll([5, 6, 7]));
+        return BookSourceHashes({5: BigInt.from(50), 6: BigInt.from(60)}, {});
+      };
       final repository = _FakeExtractionRepository(provider)
         ..textFailureByTitle.clear();
       final library = Library(categories: [])
@@ -2569,6 +2570,42 @@ void main() {
       );
       expect(shortOnly.text, 'א\nקצר data:abc');
       expect(shortOnly.dataUriLines, isNull);
+    });
+
+    test('רק BOM בתחילת המקור מושמט בפענוח', () async {
+      const bom = '\uFEFF';
+      final image = 'data:image/png;base64,${'A' * 96}';
+      final bytes = utf8.encode('$bom$image$bom שורה $image$bom\r\nסוף');
+
+      final source = await IndexingRepository.cleanDataUrisOffFrame(bytes);
+
+      expect(source.text, '$bom שורה $bom\r\nסוף');
+      expect(source.dataUriLines, [0]);
+    });
+
+    test('פענוח מקטעים משמר UTF-8 פגום וגבולות data: מקוננים', () async {
+      final image = 'data:image/png;base64,${'A' * 96}';
+      final bytes = Uint8List.fromList([
+        ...utf8.encode('לפני\r\n'),
+        0xc2,
+        ...utf8.encode(image),
+        0x80,
+        ...utf8.encode('\r\ndata:x,data:${'A' * 96}\r\n$image $image\r\nסוף'),
+      ]);
+
+      final source = await IndexingRepository.cleanDataUrisOffFrame(bytes);
+
+      expect(
+        source.text,
+        IndexingRepository.stripDataUrisForIndex(
+          utf8.decode(bytes, allowMalformed: true),
+        ),
+      );
+      expect(
+        source.text,
+        'לפני\r\n\uFFFD\uFFFD\r\ndata:x,data:${'A' * 96}\r\n \r\nסוף',
+      );
+      expect(source.dataUriLines, [1, 3]);
     });
 
     test('bytes גדולים (מסלול ה-isolate): אותה תוצאה בדיוק', () async {

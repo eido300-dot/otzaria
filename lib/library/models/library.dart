@@ -34,13 +34,15 @@ class Category {
     if (title == 'ספריית אוצריא') {
       return '/';
     }
-    String path = title;
-    Category? parent = this.parent;
-    while (parent != null && parent.title != 'ספריית אוצריא') {
-      path = '${parent.title}/$path';
-      parent = parent.parent;
+    // Walk to the root once, then join once: repeated string prepending
+    // copies the accumulated path at every depth.
+    final segments = <String>[title];
+    Category? ancestor = parent;
+    while (ancestor != null && ancestor.title != 'ספריית אוצריא') {
+      segments.add(ancestor.title);
+      ancestor = ancestor.parent;
     }
-    return '/$path';
+    return '/${segments.reversed.join('/')}';
   }
 
   ///the list of sub categories that are contained in this category
@@ -184,14 +186,22 @@ class Library extends Category {
   /// ההתנגשויות. יותר מאחת = כפילות שם, שבה זהות המלווה אינה חד-משמעית.
   List<Book> getCompanionBooks(Book book, Type companionType) {
     final normalizedTitle = _normalizeTitle(book.title);
-    return getAllBooks()
-        .where(
-          (b) =>
-              b.runtimeType == companionType &&
-              _normalizeTitle(b.title) == normalizedTitle &&
-              !_isCrossTraditionConflict(book, b),
-        )
-        .toList();
+    final candidates = <Book>[];
+    void collect(Category category) {
+      for (final candidate in category.books) {
+        if (candidate.runtimeType == companionType &&
+            _normalizeTitle(candidate.title) == normalizedTitle &&
+            !_isCrossTraditionConflict(book, candidate)) {
+          candidates.add(candidate);
+        }
+      }
+      for (final child in category.subCategories) {
+        collect(child);
+      }
+    }
+
+    collect(this);
+    return candidates;
   }
 
   /// מסכתות בבלי וירושלמי חולקות שמות — ואינן מלוות זו את זו.

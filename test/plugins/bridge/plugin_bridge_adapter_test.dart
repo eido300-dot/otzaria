@@ -218,9 +218,12 @@ class _RecordingReaderCoordinator extends BookOpenCoordinator {
     bool insertAdjacent = false,
     bool navigateToPositionIfReused = false,
     bool inSidePane = false,
+    bool navigate = true,
+    bool captureHistory = true,
   }) {
     opened = tab;
-    navigate = navigateToPositionIfReused;
+    // הפרמטר navigate מסתיר את השדה באותו שם.
+    this.navigate = navigateToPositionIfReused;
   }
 }
 
@@ -1169,6 +1172,51 @@ Future<void> main() async {
         expect(prompts.single, contains('evil.example.org'));
       },
     );
+
+    test(
+      'app.openUrl לסכמת אפליקציה מאושרת מבקש אישור תמיד, וסירוב אינו פותח',
+      () async {
+        final prompts = <String>[];
+        final gated = PluginBridgeAdapter(
+          _buildInstalledPlugin(permissions: const ['app.open_url']),
+          dependencies: PluginBridgeDependencies(
+            historyBloc: _MockHistoryBloc(),
+            tabsBloc: _StubTabsBloc(),
+            navigationBloc: _MockNavigationBloc(),
+            calendarCubit: _StubCalendarCubit(
+              _buildCalendarState(DateTime(2026, 1, 1), inIsrael: true),
+            ),
+            workspaceBloc: _MockWorkspaceBloc(),
+            searchRepository: _MockSearchRepository(),
+            personalNotesRepository: _MockPersonalNotesRepository(),
+            bookOpenCoordinator: _MockBookOpenCoordinator(),
+            themePayloadBuilder: () => <String, dynamic>{},
+            showConfirmDialog: ({required title, required content}) async {
+              prompts.add(content);
+              return false;
+            },
+            showWarningDialog:
+                ({required title, required content, required subtitle}) async =>
+                    true,
+          ),
+          pluginRepository: _StubPluginRegistryRepository(),
+        );
+
+        final result = await gated.execute('app', 'openUrl', {
+          'url': 'zayit://search?q=abc',
+        });
+
+        expect(result, isFalse);
+        expect(prompts.single, contains('zayit://search?q=abc'));
+      },
+    );
+
+    test('app.openUrl דוחה סכמה לא מאושרת', () async {
+      await expectLater(
+        adapter.execute('app', 'openUrl', {'url': 'ms-settings:privacy'}),
+        throwsA(predicate((e) => e.toString().contains('error.forbidden'))),
+      );
+    });
 
     test(
       'reader.getCurrentRef returns current reference for active pdf tab',
@@ -4855,6 +4903,150 @@ Future<void> main() async {
         expect(result, isTrue);
         expect(navigations, ['test.plugin']);
         expect(opened, isEmpty);
+      });
+
+      /// כמו [registerOpener], עם פותח שמקבל כותרת. מחזיר את הכותרות שהתקבלו.
+      List<String?> registerTitledOpener(String instanceId) {
+        final titles = <String?>[];
+        String? opener(String pluginId) {
+          titles.add(null);
+          return instanceId;
+        }
+
+        String? titled(String pluginId, String? title) {
+          titles.add(title);
+          return instanceId;
+        }
+
+        PluginPageLauncher.instance.registerInstanceOpener(
+          AppWindowKeys.current,
+          opener,
+          titledOpener: titled,
+        );
+        addTearDown(
+          () => PluginPageLauncher.instance.unregisterInstanceOpener(
+            AppWindowKeys.current,
+            opener,
+          ),
+        );
+        addTearDown(
+          () => PluginPageLauncher.instance.markPageClosed(
+            'test.plugin',
+            instanceId: instanceId,
+          ),
+        );
+        return titles;
+      }
+
+      group('title', () {
+        test('title עם newTab מועבר לפותח המופעים', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          final result = await adapterFor(
+            allowMultipleInstances: true,
+          ).execute('plugin', 'openSelf', {'newTab': true, 'title': 'ברכות ב'});
+
+          expect(result, isTrue);
+          expect(titles, ['ברכות ב']);
+        });
+
+        test('title מנוקה מרווחים ותווי בקרה', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          await adapterFor(allowMultipleInstances: true).execute(
+            'plugin',
+            'openSelf',
+            {'newTab': true, 'title': '  שבת\n\tב  '},
+          );
+
+          expect(titles, ['שבת ב']);
+        });
+
+        test('title ארוך נחתך ל-60 תווים', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          await adapterFor(allowMultipleInstances: true).execute(
+            'plugin',
+            'openSelf',
+            {'newTab': true, 'title': 'א' * 100},
+          );
+
+          expect(titles.single, 'א' * 60);
+        });
+
+        test('title נחתך לפי אשכולות גרפמה ולא באמצע emoji מורכב', () async {
+          final titles = registerTitledOpener('inst-new');
+          const familyEmoji = '👨‍👩‍👧‍👦';
+          final prefix = 'א' * 59;
+          final title = '$prefix$familyEmoji' 'ב';
+
+          await adapterFor(allowMultipleInstances: true).execute(
+            'plugin',
+            'openSelf',
+            {'newTab': true, 'title': title},
+          );
+
+          expect(titles.single, '$prefix$familyEmoji');
+        });
+
+        test('title מסיר גם תווי בקרה מטווח C1', () async {
+          final titles = registerTitledOpener('inst-new');
+          final c1Controls = String.fromCharCodes([0x0085, 0x009F]);
+
+          await adapterFor(allowMultipleInstances: true).execute(
+            'plugin',
+            'openSelf',
+            {'newTab': true, 'title': '  שבת$c1Controls' 'ב  '},
+          );
+
+          expect(titles, ['שבת ב']);
+        });
+
+        test('title ריק כמוהו כחסר — הכותרת הרגילה', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          await adapterFor(
+            allowMultipleInstances: true,
+          ).execute('plugin', 'openSelf', {'newTab': true, 'title': '   '});
+
+          expect(titles, [null]);
+        });
+
+        test('title שאינו מחרוזת → invalid_params', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          await expectLater(
+            adapterFor(
+              allowMultipleInstances: true,
+            ).execute('plugin', 'openSelf', {'newTab': true, 'title': 5}),
+            throwsWith('invalid_params'),
+          );
+          expect(titles, isEmpty);
+        });
+
+        test('title בלי newTab → invalid_params', () async {
+          final titles = registerTitledOpener('inst-new');
+
+          await expectLater(
+            adapterFor(
+              allowMultipleInstances: true,
+            ).execute('plugin', 'openSelf', {'title': 'כותרת'}),
+            throwsWith('invalid_params'),
+          );
+          expect(titles, isEmpty);
+        });
+
+        test('title: null מתנהג כאילו לא סופק גם בלי newTab', () async {
+          final navigations = <String>[];
+          PluginPageLauncher.instance.navigator = navigations.add;
+
+          final result = await adapterFor(
+            allowMultipleInstances: false,
+          ).execute('plugin', 'openSelf', {'title': null});
+
+          expect(result, isTrue);
+          expect(navigations, ['test.plugin']);
+        });
       });
 
       for (final bad in <Object>[1, 0, 'true', <String, dynamic>{}, <int>[]]) {

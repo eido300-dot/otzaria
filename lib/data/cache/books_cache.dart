@@ -47,12 +47,14 @@ class BooksCache {
     if (_isLoaded) return;
     if (_loadingFuture != null) return _loadingFuture;
 
-    _loadingFuture = _loadInternal();
-
+    final loading = _loadInternal();
+    _loadingFuture = loading;
     try {
-      await _loadingFuture;
+      await loading;
     } finally {
-      _loadingFuture = null;
+      // clear() may have started a newer generation while this one awaited.
+      // Never detach that newer in-flight load.
+      if (identical(_loadingFuture, loading)) _loadingFuture = null;
     }
   }
 
@@ -121,13 +123,21 @@ class BooksCache {
   }) {
     if (generation != _generation) return;
     if (_isLoaded || _loadingFuture != null) return;
-    _books.clear();
-    _booksById.clear();
+    // Convert the entire catalogue before touching the live cache. If a
+    // malformed row throws, readers must never observe a partially seeded list.
+    final localBooks = <BookCacheEntry>[];
+    final localBooksById = <int, BookCacheEntry>{};
     for (final row in rows) {
       final entry = _entryFromRow(row);
-      _books.add(entry);
-      _booksById[entry.id] = entry;
+      localBooks.add(entry);
+      localBooksById[entry.id] = entry;
     }
+    _books
+      ..clear()
+      ..addAll(localBooks);
+    _booksById
+      ..clear()
+      ..addAll(localBooksById);
     _isLoaded = true;
     debugPrint('[BooksCache] Seeded ${_books.length} books from catalog');
   }

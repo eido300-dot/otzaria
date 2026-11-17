@@ -57,6 +57,7 @@ void main() {
               nextMajorTooltip: 'הפרק הבא',
               navPaneOpen: false,
               navPanePinned: false,
+              canPinNavPane: true,
               onToggleNavPane: () => calls.add('pane'),
               onTogglePin: () => calls.add('pin'),
               onPrevMajor: () => calls.add('prevMajor'),
@@ -190,6 +191,7 @@ void main() {
                     nextMajorTooltip: 'הפרק הבא',
                     navPaneOpen: false,
                     navPanePinned: false,
+                    canPinNavPane: true,
                     onToggleNavPane: () {},
                     onTogglePin: () {},
                     onPrevMajor: () => calls.add('prevMajor'),
@@ -268,7 +270,8 @@ void main() {
         expect(shown, anyOf(0, 4), reason: '$width');
         expect(
           shown == 4,
-          ReaderNavCenter.navFits(center, isCompact: false),
+          // flutter_test רץ כאנדרואיד: במגע כל כפתור 48 (שאלה פתוחה 1).
+          ReaderNavCenter.navFits(center, isCompact: false, touch: true),
           reason: 'bar=$width center=$center',
         );
       }

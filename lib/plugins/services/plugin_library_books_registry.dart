@@ -113,9 +113,16 @@ class PluginLibraryBooksRegistry extends ChangeNotifier {
   /// וכל הודעה כאן מריצה מחדש את החיפוש המוצג בספרייה.
   Set<String> _visibleProviders = const {};
   List<ExternalLibraryBook> _visibleBooks = const [];
+  ({String? pluginId, List<ExternalLibraryBook> books})? _filteredPluginBooks;
 
   @visibleForTesting
   Iterable<PluginLibraryBookProvider> get providers => _providers.values;
+
+  /// ספקים שתנאי ההצגה שלהם מאפשרים איתור כעת.
+  Iterable<PluginLibraryBookProvider> get referenceProviders =>
+      _providers.values.where(
+        (p) => p.referenceSearch && _conditions.isVisible(p.pluginId, p.when),
+      );
 
   bool hasProviderFor(String pluginId) =>
       _providers.values.any((provider) => provider.pluginId == pluginId);
@@ -149,16 +156,25 @@ class PluginLibraryBooksRegistry extends ChangeNotifier {
 
   /// הספרים מבחוץ שיצטרפו לחיפוש לפי [sourceFilter]: בלי ספרים במצב
   /// "ספרי הספרייה בלבד", ורק של התוסף שנבחר במצב "ספרי התוסף בלבד".
+  /// רשימה לקריאה בלבד, נשמרת עד שינוי בספקים או בסינון.
   List<ExternalLibraryBook> get filteredVisibleBooks {
     final filter = sourceFilter.value;
     return switch (filter.source) {
       PluginLibraryBooksSource.all => _visibleBooks,
       PluginLibraryBooksSource.libraryOnly => const [],
-      PluginLibraryBooksSource.pluginOnly => [
-        for (final book in _visibleBooks)
-          if (providerOf(book)?.pluginId == filter.pluginId) book,
-      ],
+      PluginLibraryBooksSource.pluginOnly => _booksFromPlugin(filter.pluginId),
     };
+  }
+
+  List<ExternalLibraryBook> _booksFromPlugin(String? pluginId) {
+    final cached = _filteredPluginBooks;
+    if (cached != null && cached.pluginId == pluginId) return cached.books;
+    final books = List<ExternalLibraryBook>.unmodifiable([
+      for (final book in _visibleBooks)
+        if (providerOf(book)?.pluginId == pluginId) book,
+    ]);
+    _filteredPluginBooks = (pluginId: pluginId, books: books);
+    return books;
   }
 
   /// האם החיפוש מוגבל לספרי התוסף בלבד (בלי ספרי הספרייה).
@@ -541,6 +557,7 @@ class PluginLibraryBooksRegistry extends ChangeNotifier {
 
   @override
   void notifyListeners() {
+    _filteredPluginBooks = null;
     final visibleProviders = _computeVisibleProviders();
     _visibleProviders = visibleProviders;
     _visibleBooks = List.unmodifiable([
