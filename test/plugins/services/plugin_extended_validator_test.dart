@@ -537,6 +537,8 @@ void main() {
         'ui.printFile',
         'ui.exportPdf',
         'ui.setUnsavedChanges',
+        'ui.setTabInfo',
+        'ui.setFullscreen',
         'plugin.setRestoreState',
         // הרשאת events.subscribe:<topic> תלויה בנושא ונבדקת באדפטר.
         'events.setOptions',
