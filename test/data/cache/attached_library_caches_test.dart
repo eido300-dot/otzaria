@@ -83,6 +83,22 @@ void main() {
     );
   });
 
+  test('טעינות דור חופפות משתמשות באותו Future', () async {
+    createDb(
+      (db) => db.execute('UPDATE generation SET name = ?', [
+        CommentaryEra.rishonim.hebrewName,
+      ]),
+    );
+    final first = GenerationCache.instance.reloadAttached();
+    final concurrent = GenerationCache.instance.reloadAttached();
+    expect(identical(first, concurrent), isTrue);
+    await Future.wait([first, concurrent]);
+    expect(
+      GenerationCache.instance.getOrderForBook(bookId, source),
+      CommentaryEra.rishonim.order,
+    );
+  });
+
   test('כינויים לפי מקור; מסד בלי book_acronym — בלי כינויים', () async {
     final path = createDb(
       (db) => db.execute('INSERT INTO book_acronym VALUES (?, ?)', [
