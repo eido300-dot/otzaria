@@ -216,20 +216,51 @@ bool isTalmudBavliPdfLibraryDuplicate(Book book, Set<String> textTitles) =>
 
 /// פתיחת ספר ממסך הספרייה בהתאם להגדרת פורמט הבבלי: מסכת טקסט נפתחת
 /// במהדורת ה-PDF כשההגדרה היא PDF. [forcePdf] גובר על ההגדרה.
+/// [navigateToPositionIfReused] מציין יעד מפורש, כולל שורה אפס; ממפים לפני
+/// הפתיחה כדי לזהות את הספר הסופי ולנווט בכרטיסייה קיימת שלו.
 /// מחזיר true אם הפתיחה טופלה כאן.
 Future<bool> openLibraryBookPerTalmudBavliFormat(
   BuildContext context,
   Book book,
   int index, {
   bool? forcePdf,
+  bool navigateToPositionIfReused = false,
+  bool navigate = true,
+  bool captureHistory = true,
 }) async {
   if (book is! TextBook) return false;
   final coordinator = bookOpenCoordinatorOf(context);
   final target = await resolveTalmudBavliPdfBook(book, forcePdf: forcePdf);
   if (target == null) return false;
+  if (!context.mounted) return true;
+  if (navigateToPositionIfReused) {
+    final page = await textToPdfPage(
+      target.textBook,
+      index,
+      pdfBook: target.pdfBook,
+    );
+    if (!context.mounted) return true;
+    coordinator.openBook(
+      page == null ? target.textBook : target.pdfBook,
+      page ?? index,
+      '',
+      explicitIndex: true,
+      requiresStableLayout: page != null,
+      navigateToPositionIfReused: true,
+      navigate: navigate,
+      captureHistory: captureHistory,
+    );
+    return true;
+  }
   if (index <= 0) {
     // אין מיקום מפורש — פתיחה רגילה של ה-PDF, כולל שחזור מיקום מההיסטוריה.
-    coordinator.openBook(target.pdfBook, 1, '');
+    coordinator.openBook(
+      target.pdfBook,
+      1,
+      '',
+      navigate: navigate,
+      captureHistory: captureHistory,
+    );
     return true;
   }
   coordinator.openTab(
@@ -245,6 +276,8 @@ Future<bool> openLibraryBookPerTalmudBavliFormat(
         requiresStableLayout: true,
       ),
     ),
+    navigate: navigate,
+    captureHistory: captureHistory,
   );
   return true;
 }

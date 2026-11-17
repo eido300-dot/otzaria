@@ -28,6 +28,7 @@ import 'package:otzaria/search/models/search_configuration.dart';
 import 'package:otzaria/search/search_repository.dart';
 import 'package:otzaria/search/utils/literal_search_pattern.dart';
 import 'package:otzaria/search/utils/user_regex_query.dart';
+import 'package:otzaria/pdf_book/utils/pdf_engine_result_ordinals.dart';
 import 'package:otzaria/pdf_book/utils/pdf_user_regex_pattern.dart';
 import 'package:otzaria/pdf_book/utils/proximity_highlight_pattern.dart';
 import 'package:otzaria/pdf_book/utils/result_lines_highlight_pattern.dart';
@@ -363,6 +364,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
   String? _bookPath;
   bool _bookPathResolved = false;
   final Map<int, String> _pageTitles = <int, String>{};
+  PdfPageReferenceLookup? _pageReferenceLookup;
 
   InBookSearchSettings _settings = const InBookSearchSettings();
 
@@ -386,6 +388,9 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
 
   String _lastPdfHighlightSource = '';
   int _searchGeneration = 0;
+  late final _engineSearch = InBookEngineSearchCancellation(
+    widget.searchRepository,
+  );
   int _navigationRequest = 0;
 
   /// הדור שעבורו כבר נבדק אם לספר יש טקסט — הסריקה מודיעה על כל עמוד,
@@ -398,6 +403,15 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
 
   /// התבנית שנבנתה מהמונחים שהמנוע מצא בפועל — לשימוש חוזר בלחיצה על תוצאה.
   Pattern? _lastAdvancedHighlightPattern;
+
+  final _engineOrdinals = Expando<
+    ({
+      Pattern? pattern,
+      int length,
+      PdfEngineResultOrdinals<SearchResult> index,
+    })
+  >();
+  final _pdfMatchSpans = Expando<String>();
 
   /// השאילתה שעבורה תוזמנה גלילה לעמוד הנוכחי בסיום חיפוש פשוט.
   /// בחיפוש פשוט התוצאות מגיעות אסינכרונית דרך ה-listener של pdfrx, ולכן
@@ -507,28 +521,34 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
     List<PdfTextSearchResult> pageMatches,
   ) {
     final pattern = _lastAdvancedHighlightPattern;
-    String? spanKey(SearchResult r) => pattern is ProximityHighlightPattern
-        ? _resultSpanKey(pattern, r)
-        : null;
-    final key = spanKey(result);
-    var k = 0;
-    var sameSpanBefore = 0;
-    for (final other in _searchResults) {
-      if (identical(other, result)) break;
-      if (_getPdfPageNumber(other) != pageNumber) continue;
-      k++;
-      if (key != null && spanKey(other) == key) sameSpanBefore++;
+    var cached = _engineOrdinals[_searchResults];
+    if (cached == null ||
+        !identical(cached.pattern, pattern) ||
+        cached.length != _searchResults.length) {
+      cached = (
+        pattern: pattern,
+        length: _searchResults.length,
+        index: PdfEngineResultOrdinals<SearchResult>(
+          _searchResults,
+          pageOf: _getPdfPageNumber,
+          spanOf: (result) => pattern is ProximityHighlightPattern
+              ? _resultSpanKey(pattern, result)
+              : null,
+        ),
+      );
+      _engineOrdinals[_searchResults] = cached;
     }
+    final position = cached.index.positionOf(result, pageNumber);
+    final key = position.span;
     if (key != null) {
       var seen = 0;
       for (var i = 0; i < pageMatches.length; i++) {
-        if (_normalizedSpan(pageMatches[i].text) == key &&
-            seen++ == sameSpanBefore) {
-          return i;
-        }
+        final match = pageMatches[i];
+        final span = _pdfMatchSpans[match] ??= _normalizedSpan(match.text);
+        if (span == key && seen++ == position.spanOffset) return i;
       }
     }
-    return k;
+    return position.offset;
   }
 
   static String? _resultSpanKey(
@@ -580,6 +600,15 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
     try {
       if (searcher.getMatchesRangeForPage(pageNumber) == null &&
           searcher.isSearching) {
+        // הסריקה מתחילה מעמוד 1: מעבירים אותה לעמוד היעד כדי לא להמתין לכל מה שלפניו.
+        final pattern = searcher.pattern;
+        if (pattern != null) {
+          searcher.startTextSearch(
+            pattern,
+            goToFirstMatch: false,
+            startPageNumber: pageNumber,
+          );
+        }
         revealed = await revealPageIfPending?.call() ?? false;
         if (!isCurrent()) return null;
         if (searcher.getMatchesRangeForPage(pageNumber) == null &&
@@ -671,14 +700,21 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
   @override
   void didUpdateWidget(covariant PdfBookSearchView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.outline, widget.outline)) {
+    final searcherChanged = !identical(
+      oldWidget.textSearcher,
+      widget.textSearcher,
+    );
+    if (!identical(oldWidget.outline, widget.outline) ||
+        oldWidget.bookTitle != widget.bookTitle ||
+        searcherChanged) {
       _pageTitles.clear();
-      _groupedSource = null;
+      _pageReferenceLookup = null;
     }
-    if (identical(oldWidget.textSearcher, widget.textSearcher)) return;
+    if (!searcherChanged) return;
     oldWidget.textSearcher.removeListener(_onTextSearcherMatchesChanged);
     widget.textSearcher.addListener(_onTextSearcherMatchesChanged);
     _searchGeneration++;
+    _engineSearch.cancel();
     _centerOnOpenTargetPage = null;
     _cancelPageScanWait();
     _lastPdfHighlightSource = '';
@@ -686,7 +722,6 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
     _mappedMatches = const [];
     _searchResults = [];
     _resultsTruncated = false;
-    _pageTitles.clear();
     _isSearching = false;
     _searchErrorMessage = null;
     _pendingSimpleSearchScrollFor = null;
@@ -791,7 +826,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
                 // בחיפוש הפשוט: אינדקס ההתאמה ב-searcher, לניווט למקומה המדויק.
                 id: BigInt.from(i),
                 title: widget.bookTitle ?? '',
-                reference: '', // Populated by _pageTitles in build
+                reference: '', // הכתובת מוצגת בכותרת של קבוצת העמוד.
                 text: PdfBookSearchView.matchLineSnippet(matches[i], query),
                 segment: BigInt.from(matches[i].pageNumber - 1),
                 isPdf: true,
@@ -970,6 +1005,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
     );
     widget.textSearcher.removeListener(_onTextSearcherMatchesChanged);
     _cancelPageScanWait();
+    _engineSearch.cancel();
     super.dispose();
   }
 
@@ -1026,6 +1062,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
     // כל שינוי בשאילתה/במצב החיפוש מבטל תוצאות אסינכרוניות ישנות. בלי מזהה
     // דור, חיפוש איטי קודם יכול להסתיים אחרי החדש ולדרוס תוצאות והדגשות.
     final generation = ++_searchGeneration;
+    _engineSearch.cancel();
     _cancelPageScanWait();
     _resultsTruncated = false;
     // הדגל שייך לדור הקודם: כל מסלול יוצא מכאן בסדר השאילתה, והנסיגה
@@ -1130,6 +1167,7 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
         bookPath: _bookPath!,
         limit: kInBookEngineFetchLimit,
         settings: _settings,
+        cancelRequestId: _engineSearch.next(),
       );
 
       final indexedFilePath = _indexedFilePath;
@@ -1199,10 +1237,6 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
       if (page != _lastGroupedPage) {
         _groupedItems.add(page);
         _lastGroupedPage = page;
-        _pageTitles.putIfAbsent(
-          page,
-          () => referenceFromPageNumber(page, widget.outline, widget.bookTitle),
-        );
       }
       _groupedItems.add(result);
     }
@@ -1239,11 +1273,16 @@ class PdfBookSearchViewState extends State<PdfBookSearchView>
                 index == items.length - 1 || items[index + 1] is int;
 
             if (item is int) {
+              final reference = _pageTitles.putIfAbsent(item, () {
+                final lookup = _pageReferenceLookup ??= PdfPageReferenceLookup(
+                  widget.outline,
+                  widget.bookTitle,
+                );
+                return lookup.referenceAt(item);
+              });
+              final text = reference.isEmpty ? 'עמוד $item' : reference;
               return BlocBuilder<SettingsBloc, SettingsState>(
                 builder: (context, settingsState) {
-                  final text = _pageTitles[item]?.isNotEmpty == true
-                      ? _pageTitles[item]!
-                      : 'עמוד $item';
                   return NavTreeHeader(
                     title: withHolyNamesSetting(text, settingsState),
                   );

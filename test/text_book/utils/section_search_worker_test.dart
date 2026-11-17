@@ -94,6 +94,7 @@ void main() {
             {
               'index': 2,
               'snippet': clean,
+              'snippetGroupOffset': 0,
               'address': ' פרק א ',
               'query': 'אור',
               'matchOffset': offset,
@@ -345,6 +346,25 @@ void main() {
       expect(response['results'] as List, hasLength(1000));
       expect(response['truncated'], isTrue);
       expect(harness.cleanedRawLines, content.sublist(0, 1001));
+    });
+
+    test('סריקה מדלגת על התאמות ריקות ושומרת על סדר ההופעות', () async {
+      final harness = _RuntimeHarness();
+      addTearDown(harness.dispose);
+      harness.deliver({
+        'type': 'search',
+        'requestId': 1,
+        'content': ['לפני אור אור', 'שורה אחרת', 'גם אור כאן'],
+        'query': 'אור',
+        'patternSource': '^|אור',
+      });
+
+      final response = await harness.waitForMessage(requestId: 1);
+      final results = (response['results'] as List).cast<Map>();
+      expect(results.map((result) => result['index']), [0, 0, 2]);
+      expect(results.map((result) => result['matchOffset']), [5, 9, 3]);
+      expect(results.map((result) => result['snippetGroupOffset']), [5, 5, 3]);
+      expect(response['truncated'], isFalse);
     });
 
     test('משדר error עם requestId כשבקשה נכשלת', () async {

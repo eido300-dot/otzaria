@@ -24,6 +24,8 @@ import 'package:otzaria/search/utils/foundational_book_classifier.dart';
 import 'package:otzaria/search/utils/scope_tree.dart';
 import 'package:otzaria/services/commentary_service.dart';
 import 'package:otzaria/settings/l10n/settings_l10n_exports.dart';
+import 'package:otzaria/core/messages/library_messages.dart';
+import 'package:otzaria/core/ui_snack.dart';
 import 'package:otzaria/theme/app_surfaces.dart';
 import 'package:otzaria/theme/app_tokens.dart';
 import 'package:otzaria/widgets/controls/app_icon_button.dart';
@@ -217,8 +219,26 @@ class _SearchScopeMenuButtonState extends State<SearchScopeMenuButton> {
   }
 
   Future<void> _deleteSavedScope(String name) async {
+    final before = SearchScopePreferences.loadSavedScopes();
+    final index = before.indexWhere((scope) => scope.name == name);
+    if (index < 0) return;
+    final deleted = before[index];
     final next = await SearchScopePreferences.removeSavedScope(name);
-    if (mounted) setState(() => _savedScopes = next);
+    if (!mounted) return;
+    setState(() => _savedScopes = next);
+    UiSnack.showWithAction(
+      message: LibraryMessages.savedScopeDeleted(name),
+      actionLabel: context.settingsText('בטל'),
+      onAction: () async {
+        final restored = SearchScopePreferences.loadSavedScopes().toList();
+        // שמירה חדשה באותו שם קודמת לביטול המחיקה הישנה.
+        if (!restored.any((scope) => scope.name == name)) {
+          restored.insert(index.clamp(0, restored.length), deleted);
+          await SearchScopePreferences.saveSavedScopes(restored);
+        }
+        if (mounted) setState(() => _savedScopes = restored);
+      },
+    );
   }
 
   Future<void> _loadBaseBookIds() async {
@@ -693,6 +713,8 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
   final ScrollController _scrollController = ScrollController();
 
   late Set<String> _selection;
+  Set<String>? _cachedCategoryPart;
+  Set<String>? _cachedCategoryAncestors;
   _View _view = _View.root;
   final List<ScopeNode> _stack = [];
   int _highlight = 0;
@@ -741,7 +763,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
     final incoming = widget.selected;
     if (incoming.length != _selection.length ||
         !incoming.containsAll(_selection)) {
-      _selection = Set<String>.from(incoming);
+      _replaceSelection(Set<String>.from(incoming));
     }
     if (_hasActiveSearch) {
       widget.onRequireTree();
@@ -772,8 +794,19 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
       normalizeFindQuery(widget.searchController.text);
   bool get _hasActiveSearch => _normalizedQuery.length >= _minSearchQueryLength;
 
-  Set<String> get _categoryPart =>
-      FacetHelper.categoryFacetsOf(_selection).toSet();
+  Set<String> get _categoryPart => _cachedCategoryPart ??= _selection
+      .where((facet) => !FacetHelper.isDimensionFacet(facet))
+      .toSet();
+
+  Set<String> get _categoryAncestors => _cachedCategoryAncestors ??=
+      ScopeTree.ancestorsOfSelectedFacets(_categoryPart);
+
+  void _replaceSelection(Set<String> next) {
+    _selection = next;
+    _cachedCategoryPart = null;
+    _cachedCategoryAncestors = null;
+  }
+
   Set<String> get _dimensionPart =>
       FacetHelper.dimensionFacetsOf(_selection).toSet();
 
@@ -805,7 +838,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
   }
 
   void _apply(Set<String> next) {
-    setState(() => _selection = next);
+    setState(() => _replaceSelection(next));
     widget.onChanged(Set<String>.from(next));
     widget.onKeepFocus();
   }
@@ -817,9 +850,10 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
   void _toggleCategoryFacet(String facet, bool select) {
     final tree = widget.tree;
     if (tree == null) return;
+    final categoryPart = Set<String>.of(_categoryPart);
     final nextCategory = select
-        ? tree.selectFacet(facet, _categoryPart)
-        : tree.deselectFacet(facet, _categoryPart);
+        ? tree.selectFacet(facet, categoryPart)
+        : tree.deselectFacet(facet, categoryPart);
     _setCategorySelection(nextCategory);
   }
 
@@ -933,7 +967,7 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
     AppMotion.scrollPosition(
       _scrollController.position,
       (target - _rowHeight).clamp(min, max),
-      const Duration(milliseconds: 120),
+      AppTokens.animFast,
       curve: Curves.easeOut,
     );
   }
@@ -974,7 +1008,11 @@ class _ScopeMenuPanelState extends State<_ScopeMenuPanel> {
       label: node.title,
       icon: FluentIcons.folder_24_regular,
       // סימון תיקיה בוחר את התיקיה כולה; לחיצה על השורה נכנסת פנימה (מעבר מסך).
-      check: tree.categoryCheckState(node.facet, _categoryPart),
+      check: tree.categoryCheckState(
+        node.facet,
+        _categoryPart,
+        selectedAncestors: _categoryAncestors,
+      ),
       onToggle: (v) => _toggleCategoryFacet(node.facet, v),
       onDrill: () => _drillInto(node),
     );

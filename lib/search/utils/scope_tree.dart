@@ -145,14 +145,12 @@ class ScopeTree {
   );
 
   /// העץ בלי ספרים אישיים ומצורפים, ובלי קטגוריות שנותרו ריקות.
-  ScopeTree officialOnly() => _officialOnlyCache[this] ??= _pruned(
-    (book) => book.source.isOfficial,
-  );
+  ScopeTree officialOnly() =>
+      _officialOnlyCache[this] ??= _pruned((book) => book.source.isOfficial);
 
   /// העץ בלי ספרים אישיים, ובלי קטגוריות שנותרו ריקות.
-  ScopeTree withoutUserBooks() => _withoutUserBooksCache[this] ??= _pruned(
-    (book) => !book.source.isUser,
-  );
+  ScopeTree withoutUserBooks() =>
+      _withoutUserBooksCache[this] ??= _pruned((book) => !book.source.isUser);
 
   ScopeTree _pruned(bool Function(Book book) keep) {
     final nodesByFacet = <String, ScopeNode>{};
@@ -160,9 +158,7 @@ class ScopeTree {
       if (node is BookScopeNode) {
         return keep(node.book) ? node : null;
       }
-      final children = [
-        for (final child in node.children) ?prune(child),
-      ];
+      final children = [for (final child in node.children) ?prune(child)];
       if (children.isEmpty) return null;
       final pruned = CategoryScopeNode._pruned(node, children);
       nodesByFacet[pruned.facet] = pruned;
@@ -181,34 +177,38 @@ class ScopeTree {
 
   bool isAllSelected(Set<String> selection) => selection.contains('/');
 
-  /// מחזיר true/false/null (tristate) למצב הסימון של קטגוריה לפי נתיבה.
-  bool? categoryCheckState(String categoryPath, Set<String> selection) {
-    if (isAllSelected(selection)) return true;
-    if (selection.contains(categoryPath)) return true;
+  /// נתיבי קטגוריות עם צאצא נבחר, לשימוש חוזר באותה בחירה.
+  static Set<String> ancestorsOfSelectedFacets(Set<String> selection) {
+    final ancestors = <String>{};
     for (final facet in selection) {
-      if (facet != '/' && categoryPath.startsWith('$facet/')) return true;
+      var separator = facet.lastIndexOf('/');
+      while (separator >= 0) {
+        if (!ancestors.add(facet.substring(0, separator)) || separator == 0) {
+          break;
+        }
+        separator = facet.lastIndexOf('/', separator - 1);
+      }
     }
-    if (_hasSelectedDescendant(categoryPath, selection)) return null;
-    return false;
+    return ancestors;
   }
 
-  bool _hasSelectedDescendant(String categoryPath, Set<String> selection) {
-    for (final facet in selection) {
-      if (facet.startsWith('$categoryPath/')) return true;
-    }
-    return false;
+  /// מחזיר true/false/null (tristate) למצב הסימון של קטגוריה לפי נתיבה.
+  /// בסדרת בדיקות אפשר לספק [selectedAncestors] שחושב פעם אחת מהבחירה.
+  bool? categoryCheckState(
+    String categoryPath,
+    Set<String> selection, {
+    Set<String>? selectedAncestors,
+  }) {
+    if (isFacetCovered(categoryPath, selection)) return true;
+    final hasSelectedDescendant =
+        selectedAncestors?.contains(categoryPath) ??
+        selection.any((facet) => facet.startsWith('$categoryPath/'));
+    return hasSelectedDescendant ? null : false;
   }
 
   /// האם [facet] מכוסה ע"י הבחירה (נבחר ישירות, או אב שלו נבחר, או הכל).
-  bool isFacetCovered(String facet, Set<String> selection) {
-    if (isAllSelected(selection)) return true;
-    if (selection.contains(facet)) return true;
-    for (final selected in selection) {
-      if (selected == '/' || selected == facet) continue;
-      if (facet.startsWith('$selected/')) return true;
-    }
-    return false;
-  }
+  bool isFacetCovered(String facet, Set<String> selection) =>
+      selection.contains(facet) || _findCoveringFacet(facet, selection) != null;
 
   // --- בחירה ---
 
@@ -232,6 +232,11 @@ class ScopeTree {
   }
 
   Set<String> deselectFacet(String facet, Set<String> selection) {
+    if (isAllSelected(selection)) {
+      selection
+        ..clear()
+        ..add('/');
+    }
     if (selection.remove(facet)) {
       return _consolidateSelection(selection);
     }
@@ -268,19 +273,15 @@ class ScopeTree {
   }
 
   String? _findCoveringFacet(String facet, Set<String> selection) {
-    String? bestMatch;
-    for (final selected in selection) {
-      if (selected == '/') {
-        bestMatch = '/';
-        continue;
-      }
-      if (facet.startsWith('$selected/')) {
-        if (bestMatch == null || selected.length > bestMatch.length) {
-          bestMatch = selected;
-        }
-      }
+    if (selection.contains('/')) return '/';
+    var separator = facet.lastIndexOf('/');
+    while (separator >= 0) {
+      final ancestor = facet.substring(0, separator);
+      if (ancestor != '/' && selection.contains(ancestor)) return ancestor;
+      if (separator == 0) break;
+      separator = facet.lastIndexOf('/', separator - 1);
     }
-    return bestMatch;
+    return null;
   }
 
   void _explodeExcludingNode(
@@ -330,15 +331,7 @@ class ScopeTree {
   }
 
   bool _consolidateNode(ScopeNode node, Set<String> selection) {
-    if (selection.contains(node.facet)) {
-      return true;
-    }
-
-    for (final selected in selection) {
-      if (selected != '/' && node.facet.startsWith('$selected/')) {
-        return true;
-      }
-    }
+    if (isFacetCovered(node.facet, selection)) return true;
 
     if (node.children.isEmpty) {
       return false;

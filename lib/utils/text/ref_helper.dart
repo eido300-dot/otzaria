@@ -7,6 +7,7 @@ import 'package:otzaria/data/data_providers/user_books_database_holder.dart';
 import 'package:otzaria/migration/database/repository/seforim_repository.dart';
 import 'package:otzaria/models/book_source.dart';
 import 'package:otzaria/models/books.dart';
+import 'package:otzaria/pdf_book/utils/pdf_outline_page_lookup.dart';
 import 'package:pdfrx/pdfrx.dart';
 
 Future<String> refFromIndex(
@@ -432,6 +433,24 @@ String referenceFromPageNumber(
     texts = texts.sublist(1);
   }
   return texts.join(', ');
+}
+
+/// מיפוי כתובות לעמודי PDF רבים מתוך תמונת outline אחת, בלי לסרוק אותו לכל עמוד.
+class PdfPageReferenceLookup {
+  PdfPageReferenceLookup(List<PdfOutlineNode>? outline, [this._bookTitle])
+    : _lookup = PdfOutlinePageLookup(outline);
+
+  final PdfOutlinePageLookup _lookup;
+  final String? _bookTitle;
+
+  /// הכתובת של [pageNumber], גם בקריאות שאינן לפי סדר העמודים.
+  String referenceAt(int pageNumber) {
+    final path = _lookup.pathAt(pageNumber);
+    if (_bookTitle != null && path.lastOrNull?.title.trim() == _bookTitle) {
+      path.removeLast();
+    }
+    return path.reversed.map((node) => node.title.trim()).join(', ');
+  }
 }
 
 /// האינדקס הגדול ביותר מבין הכותרות שהאינדקס שלהן ושל כל אבותיהן <=

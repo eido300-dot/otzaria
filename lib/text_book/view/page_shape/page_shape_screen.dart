@@ -1373,7 +1373,6 @@ class _PageShapeScreenState extends State<PageShapeScreen>
     isOpen: _isSettingsPaneOpen,
     onClose: _closeSettingsPane,
     alignment: AlignmentDirectional.centerStart,
-    width: 400,
     title: 'הגדרות צורת הדף',
     scrollable: true,
     child: PageShapeSettingsPanel(
@@ -1932,7 +1931,8 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       ItemPositionsListener.create();
   final ScrollOffsetController _scrollOffsetController =
       ScrollOffsetController();
-  List<Link> _relevantLinks = [];
+  List<Link> _relevantLinks = const [];
+  CommentarySyncIndex _syncIndex = const CommentarySyncIndex.empty();
   SuperCommentaryLinkLoader? _superLinks;
 
   // עוגני מפרשי-המפרש (שער הציון וכד') והלינקר בתוך טקסט המפרש — נטענים
@@ -2192,7 +2192,6 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
         if (_isNotesColumn) {
           _refreshNotesColumn(state);
         } else if (!identical(_lastLinks, state.links)) {
-          _lastLinks = state.links;
           _refreshRelevantLinks(state);
         }
         if (_superLinks != null) {
@@ -2210,7 +2209,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
   void _showNotesColumn(TextBookLoaded state) {
     final column = buildPageShapeNotesColumn(state.content, state.bookNotes);
     _notesColumnSource = (state.content, state.bookNotes);
-    _relevantLinks = column.links;
+    _replaceRelevantLinks(column.links);
     // טעינת טווחי תוכן ברקע מחליפה את state.content בלי לשנות את ההערות;
     // בנייה מחדש הייתה מאפסת את הסנכרון ומקפיצה את הטור.
     if (!_isLoading &&
@@ -2242,17 +2241,26 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
     _showNotesColumn(state);
   }
 
+  void _replaceRelevantLinks(List<Link> links) {
+    if (identical(_relevantLinks, links)) return;
+    _relevantLinks = links;
+    _syncIndex = CommentarySyncIndex(links);
+  }
+
   void _refreshRelevantLinks(TextBookLoaded state) {
+    _lastLinks = state.links;
     final superLinks = _superLinks;
     if (superLinks != null) {
-      _relevantLinks = superLinks.links;
+      _replaceRelevantLinks(superLinks.links);
       return;
     }
-    _relevantLinks = state.links.where((link) {
-      final linkTitle = utils.getTitleFromPath(link.path2);
-      return linkTitle == widget.commentatorName &&
-          LinkTypes.isDependentTextLink(link.connectionType);
-    }).toList();
+    _replaceRelevantLinks(
+      state.links.where((link) {
+        final linkTitle = utils.getTitleFromPath(link.path2);
+        return linkTitle == widget.commentatorName &&
+            LinkTypes.isDependentTextLink(link.connectionType);
+      }).toList(),
+    );
   }
 
   /// טוען את קישורי טור מפרש-העל סביב שורת הראשי הנוכחית, ומסנכרן כשנוספו.
@@ -2270,7 +2278,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
       return false;
     }
     if (!added || !mounted || !identical(loader, _superLinks)) return added;
-    setState(() => _relevantLinks = loader.links);
+    setState(() => _replaceRelevantLinks(loader.links));
     final latest = context.read<TextBookBloc>().state;
     if (latest is TextBookLoaded) {
       _syncWithMainText(latest);
@@ -2461,10 +2469,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
     // חייב להשתמש באותו חישוב כמו _syncWithMainText, אחרת ה-preview ייטען
     // בחלון קטן סביב יעד אחר, והסנכרון השוטף לא יוכל לגלול ליעד כי הוא
     // מחוץ לחלון שנטען.
-    return CommentarySyncHelper.getCommentaryTargetIndex(
-      linksForCommentary: _relevantLinks,
-      logicalMainIndex: logicalIndex,
-    );
+    return _syncIndex.targetIndexFor(logicalIndex);
   }
 
   Future<_LoadedCommentaryData?> _fetchFullCommentaryData(
@@ -2851,10 +2856,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
         : CommentarySyncHelper.getLogicalIndex(currentMainIndex, state.content);
 
     // חישוב האינדקס היעד במפרש — היצמדות לקישור הקודם הקרוב ביותר
-    final targetIndex = CommentarySyncHelper.getCommentaryTargetIndex(
-      linksForCommentary: _relevantLinks,
-      logicalMainIndex: logicalIndex,
-    );
+    final targetIndex = _syncIndex.targetIndexFor(logicalIndex);
 
     // אם אין קישור - לא מזיזים את המפרש
     if (targetIndex == null) {
@@ -2934,7 +2936,7 @@ class _CommentaryPaneState extends State<_CommentaryPane> {
     unawaited(
       _scrollOffsetController.animateScroll(
         offset: delta,
-        duration: const Duration(milliseconds: 120),
+        duration: AppTokens.animFast,
         curve: Curves.easeOut,
       ),
     );
